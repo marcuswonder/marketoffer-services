@@ -1,0 +1,40 @@
+{
+  "name": "men-redis-scraper",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon --watch src --exec ts-node src/api/index.ts",
+    "dev:worker:ch": "nodemon --watch src --exec ts-node src/workers/chAppointments.ts",
+    "dev:worker:company": "nodemon --watch src --exec ts-node src/workers/companyDiscovery.ts",
+    "dev:worker:person": "nodemon --watch src --exec ts-node src/workers/personLinkedin.ts",
+    "build": "tsc -p .",
+    "start": "node dist/api/index.js",
+    "worker:ch": "node dist/workers/chAppointments.js",
+    "worker:company": "node dist/workers/companyDiscovery.js",
+    "worker:person": "node dist/workers/personLinkedin.js",
+    "seed:hosts": "ts-node scripts/seedGenericHosts.ts airtable_schema/generic_hosts.csv",
+    "test:airtable": "ts-node scripts/testAirtable.ts"
+  },
+  "dependencies": {
+    "@bull-board/api": "^5.19.4",
+    "@bull-board/express": "^5.19.4",
+    "airtable": "^0.12.2",
+    "bullmq": "^5.12.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ioredis": "^5.3.2",
+    "p-limit": "^6.1.0",
+    "pino": "^9.3.2",
+    "undici": "^7.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.5.0",
+    "nodemon": "^3.1.4",
+    "pino-pretty": "^11.2.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.2"
+  }
+}
