@@ -13,12 +13,10 @@
     "worker:ch": "node dist/workers/chAppointments.js",
     "worker:company": "node dist/workers/companyDiscovery.js",
     "worker:person": "node dist/workers/personLinkedin.js",
-    "seed:hosts": "ts-node scripts/seedGenericHosts.ts airtable_schema/generic_hosts.csv",
-    "test:airtable": "ts-node scripts/testAirtable.ts"
+    "seed:hosts": "ts-node --esm scripts/seedGenericHosts.ts airtable_schema/generic_hosts.csv",
+    "test:airtable": "ts-node --esm scripts/testAirtable.ts"
   },
   "dependencies": {
-    "@bull-board/api": "^5.19.4",
-    "@bull-board/express": "^5.19.4",
     "airtable": "^0.12.2",
     "bullmq": "^5.12.1",
     "dotenv": "^16.4.5",

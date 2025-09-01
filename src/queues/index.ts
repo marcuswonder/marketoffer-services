@@ -1,13 +1,18 @@
-import { Queue, QueueScheduler } from "bullmq";
+import { Queue } from "bullmq";
 import IORedis from "ioredis";
 
-export const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379");
+const REDIS_URL = process.env.REDIS_URL || "redis://redis:6379";
 
-export const chQ = new Queue("ch:appointments", { connection });
-export const companyQ = new Queue("company:discovery", { connection });
-export const personQ = new Queue("person:linkedin", { connection });
+export const connection = new IORedis(REDIS_URL, {
+  maxRetriesPerRequest: null,
+  enableReadyCheck: false,
+});
+
+export const chQ = new Queue("ch-appointments", { connection });
+export const companyQ = new Queue("company-discovery", { connection });
+export const personQ = new Queue("person-linkedin", { connection });
 
 // Schedulers to handle delayed/retried jobs
-new QueueScheduler("ch:appointments", { connection });
-new QueueScheduler("company:discovery", { connection });
-new QueueScheduler("person:linkedin", { connection });
+new Queue("ch-appointments", { connection });
+new Queue("company-discovery", { connection });
+new Queue("person-linkedin", { connection });

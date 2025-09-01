@@ -19,10 +19,11 @@ async function serperSearch(q: string) {
     body: JSON.stringify({ q, gl: "uk", hl: "en", autocorrect: true })
   });
   if (!res.ok) throw new Error(`Serper ${res.status}`);
-  return res.json();
+  // return res.json();
+  return (await res.json()) as any;
 }
 
-export default new Worker("company:discovery", async job => {
+export default new Worker("company-discovery", async job => {
   const { companyNumber, companyName, address, postcode } = job.data as any;
   const cleaned = cleanCompanyName(companyName || "");
   const queries = [
@@ -33,7 +34,8 @@ export default new Worker("company:discovery", async job => {
   const hosts = new Set<string>();
   for (const q of queries) {
     const data = await serperSearch(q);
-    const items = [...(data.organic || []), ...(data.peopleAlsoSearch || []), ...(data.knowledgeGraph || [])];
+    // const items = [...(data.organic || []), ...(data.peopleAlsoSearch || []), ...(data.knowledgeGraph || [])];
+    const items = [...((data as any).organic || []), ...((data as any).peopleAlsoSearch || []), ...((data as any).knowledgeGraph || [])];
     for (const it of items) {
       const url = it.link || it.url || "";
       if (!url) continue;

@@ -1,0 +1,17 @@
+# Environment
+.env
+.env.*
+
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+npm-debug.log*
+
+# Scripts
+scripts
+
+# Build output
+dist

@@ -14,10 +14,11 @@ async function serperSearch(q: string) {
     body: JSON.stringify({ q, gl: "uk", hl: "en", autocorrect: true })
   });
   if (!res.ok) throw new Error(`Serper ${res.status}`);
-  return res.json();
+  // return res.json();
+  return (await res.json()) as any;
 }
 
-export default new Worker("person:linkedin", async job => {
+export default new Worker("person-linkedin", async job => {
   const { personId } = job.data as { personId: string };
 
   const person = await base("People").find(personId);
@@ -32,7 +33,8 @@ export default new Worker("person:linkedin", async job => {
   const urls = new Set<string>();
   for (const q of queries) {
     const data = await serperSearch(q);
-    for (const it of data.organic || []) {
+    // for (const it of data.organic || []) {
+    for (const it of (data as any).organic || []) {
       const link = it.link || "";
       if (link && link.includes("linkedin.com/in")) urls.add(link.split("?")[0]);
     }

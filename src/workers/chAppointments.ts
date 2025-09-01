@@ -21,7 +21,7 @@ type CHOfficer = {
   links?: { officer?: { appointments?: string } };
 };
 
-export default new Worker("ch:appointments", async job => {
+export default new Worker("ch-appointments", async job => {
   const { companyNumber } = job.data as { companyNumber: string };
 
   const company = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}`, { headers: chHeaders() });
