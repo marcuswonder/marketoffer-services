@@ -27,12 +27,22 @@ type CHOfficer = {
 await initDb();
 export default new Worker("ch-appointments", async job => {
   const { companyNumber, firstName, lastName, contactId } = job.data as { companyNumber: string; firstName?: string; lastName?: string; contactId?: string };
+  console.log("companyNumber in initDB in workers/chAppointments.ts", companyNumber);
+  console.log("firstName in initDB in workers/chAppointments.ts", firstName);
+  console.log("lastName in initDB in workers/chAppointments.ts", lastName);
+  console.log("contactId in initDB in workers/chAppointments.ts", contactId);
+
   await startJob({ jobId: job.id as string, queue: 'ch-appointments', name: job.name, payload: job.data });
 
   try {
     const company = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}`, { headers: chHeaders() });
+    console.log("company in initDB in workers/chAppointments.ts", company);
+
     await logEvent(job.id as string, 'info', 'Fetched company', { companyNumber, company_name: company.company_name });
+
     const officers = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}/officers`, { headers: chHeaders() });
+    console.log("officers in initDB in workers/chAppointments.ts", officers);
+    
     await logEvent(job.id as string, 'info', 'Fetched officers', { count: (officers.items || []).length });
 
   // Helper to fetch full appointment list for an officer (with simple pagination)
