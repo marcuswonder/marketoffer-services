@@ -5,9 +5,23 @@ import { chQ, companyQ, personQ } from "../../queues/index.js";
 export const router = Router();
 
 router.post("/jobs/ch-appointments", async (req, res) => {
-  const { companyNumber } = z.object({ companyNumber: z.string().min(2) }).parse(req.body);
-  const jobId = `ch:${companyNumber}`;
-  await chQ.add("fetch", { companyNumber }, { jobId, attempts: 5, backoff: { type: "exponential", delay: 1000 } });
+  // Accept payload from JSON body primarily; fall back to querystring for convenience
+  const source: any = { ...(req.query || {}), ...(req.body || {}) };
+  const { companyNumber, firstName, lastName, contactId } = z
+    .object({
+      companyNumber: z.string().min(2),
+      firstName: z.string().min(1).optional(),
+      lastName: z.string().min(1).optional(),
+      contactId: z.string().min(3).optional(),
+    })
+    .parse(source);
+
+  const jobId = `ch:${companyNumber}:${(firstName || "").toLowerCase()}:${(lastName || "").toLowerCase()}:${contactId || ""}`;
+  await chQ.add(
+    "fetch",
+    { companyNumber, firstName, lastName, contactId },
+    { jobId, attempts: 5, backoff: { type: "exponential", delay: 1000 } }
+  );
   res.json({ jobId });
 });
 

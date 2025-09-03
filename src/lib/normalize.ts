@@ -31,3 +31,24 @@ export function officerIdFromUrl(url: string) {
 export function monthStr(m: number) {
   return ["January","February","March","April","May","June","July","August","September","October","November","December"][m-1] || "";
 }
+
+
+export function normalizeWord(s: string) {
+  return (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+export function nameMatches(
+  target: { first?: string; last?: string },
+  candidate: { first: string; last: string }
+) {
+  const tf = normalizeWord(target.first || "");
+  const tl = normalizeWord(target.last || "");
+  const cf = normalizeWord(candidate.first);
+  const cl = normalizeWord(candidate.last);
+  // Last name must match if provided
+  if (tl && cl !== tl) return false;
+  // First name: accept exact or initial match if provided
+  if (tf && cf && cf !== tf && cf[0] !== tf[0]) return false;
+  return true;
+}
+
