@@ -5,6 +5,9 @@ import { httpGetJson } from "../lib/http.js";
 import { parseOfficerName, officerIdFromUrl, monthStr, nameMatches } from "../lib/normalize.js";
 import { batchCreate } from "../lib/airtable.js";
 import { logger } from "../lib/logger.js";
+import { initDb, startJob, logEvent, completeJob, failJob } from "../lib/progress.js";
+
+const WRITE_TO_AIRTABLE = (process.env.WRITE_TO_AIRTABLE || "").toLowerCase() === 'true';
 
 const CH_BASE = process.env.CH_API_BASE || "https://api.company-information.service.gov.uk";
 const CH_KEY = process.env.CH_API_KEY || "";
@@ -21,11 +24,16 @@ type CHOfficer = {
   links?: { officer?: { appointments?: string } };
 };
 
+await initDb();
 export default new Worker("ch-appointments", async job => {
   const { companyNumber, firstName, lastName, contactId } = job.data as { companyNumber: string; firstName?: string; lastName?: string; contactId?: string };
+  await startJob({ jobId: job.id as string, queue: 'ch-appointments', name: job.name, payload: job.data });
 
-  const company = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}`, { headers: chHeaders() });
-  const officers = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}/officers`, { headers: chHeaders() });
+  try {
+    const company = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}`, { headers: chHeaders() });
+    await logEvent(job.id as string, 'info', 'Fetched company', { companyNumber, company_name: company.company_name });
+    const officers = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}/officers`, { headers: chHeaders() });
+    await logEvent(job.id as string, 'info', 'Fetched officers', { count: (officers.items || []).length });
 
   // Helper to fetch full appointment list for an officer (with simple pagination)
   async function fetchOfficerAppointments(officerId: string) {
@@ -58,8 +66,8 @@ export default new Worker("ch-appointments", async job => {
     return parts.join(", ");
   }
 
-  const peopleRecords: any[] = [];
-  const appointmentRecords: any[] = [];
+    const peopleRecords: any[] = [];
+    const appointmentRecords: any[] = [];
 
   const officerItems = (officers.items || []) as CHOfficer[];
   // Filter directors and optionally match by provided name
@@ -80,7 +88,7 @@ export default new Worker("ch-appointments", async job => {
   // Cache for company profiles to avoid duplicate calls
   const companyCache = new Map<string, any>();
 
-  for (const o of toProcess) {
+    for (const o of toProcess) {
     if (!o.name) continue;
     const { first, middle, last } = parseOfficerName(o.name);
     const dob = o.date_of_birth;
@@ -156,10 +164,10 @@ export default new Worker("ch-appointments", async job => {
         officer_id: officerId,
       },
     });
-  }
+    }
 
   // Also check PSCs if no directorial match was found
-  if (!peopleRecords.length) {
+    if (!peopleRecords.length) {
     try {
       const pscs: any = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}/persons-with-significant-control`, { headers: chHeaders() });
       const pscItems = (pscs.items || []) as any[];
@@ -201,13 +209,28 @@ export default new Worker("ch-appointments", async job => {
     } catch (e) {
       // PSC endpoint may not exist or may be restricted; ignore if it fails
     }
-  }
+    }
 
   // Persist minimal records to Airtable as before
-  if (peopleRecords.length) await batchCreate("People", peopleRecords.map(({ fields }) => ({ fields })));
-  if (appointmentRecords.length) await batchCreate("Appointments", appointmentRecords);
+    // Persist minimal records to Airtable only after we have full enriched results
+    if (WRITE_TO_AIRTABLE) {
+      if (peopleRecords.length) await batchCreate("People", peopleRecords.map(({ fields }) => ({ fields })));
+      if (appointmentRecords.length) await batchCreate("Appointments", appointmentRecords);
+    } else {
+      await logEvent(job.id as string, 'info', 'Airtable write skipped', {
+        reason: 'WRITE_TO_AIRTABLE=false',
+        tables: ['People', 'Appointments'],
+        people: peopleRecords.length,
+        appointments: appointmentRecords.length
+      });
+    }
 
-  // Log enriched payloads for downstream usage / inspection
-  const enriched = peopleRecords.map((r) => r._enriched);
-  logger.info({ companyNumber, matches: enriched.length, enriched }, "CH processed");
+    const enriched = peopleRecords.map((r) => r._enriched);
+    await completeJob(job.id as string, { companyNumber, matches: enriched.length, enriched });
+    logger.info({ companyNumber, matches: enriched.length }, "CH processed");
+  } catch (err) {
+    await failJob(job.id as string, err);
+    logger.error({ companyNumber, err: String(err) }, 'CH worker failed');
+    throw err;
+  }
 }, { connection, concurrency: 2 });
