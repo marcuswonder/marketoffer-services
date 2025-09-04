@@ -199,12 +199,15 @@ export default new Worker("ch-appointments", async job => {
             return normalizeWord(a.first) === normalizeWord(b.first) && normalizeWord(a.last) === normalizeWord(b.last);
           }
 
-          // Middle name match if baseline has one (exact normalized match)
+          // Middle name match if baseline has one
+          // Allow: exact match OR candidate missing OR candidate initial matches baseline
           function middleNameAcceptable(baseMiddle: string, candMiddle: string) {
             const bm = normalizeWord(baseMiddle);
             if (!bm) return true; // nothing to check
             const cm = normalizeWord(candMiddle);
-            return bm === cm;
+            if (!cm) return true; // candidate omitted middle name
+            if (bm === cm) return true;
+            return bm[0] && cm[0] && bm[0] === cm[0];
           }
 
           // Filter and collect distinct officer IDs that appear to be the same person
@@ -226,11 +229,13 @@ export default new Worker("ch-appointments", async job => {
               if (!parsed.dobYear || parsed.dobYear !== baselineDobYear) continue;
             }
 
-            // Nationality exact match (requires fetching a small sample of appointments to inspect nationality field)
+            // Nationality: only enforce if baseline exists AND candidate provides a value
             if (baselineNationality) {
               const sample = await fetchOfficerAppointments(parsed.id, 1);
               const nat = (sample[0]?.nationality || sample[0]?.person?.nationality || sample[0]?.officer?.nationality || "").toString();
-              if (normalizeWord(nat) !== normalizeWord(baselineNationality)) continue;
+              const cn = normalizeWord(nat);
+              const bn = normalizeWord(baselineNationality);
+              if (cn && cn !== bn) continue;
             }
             relatedOfficerIds.add(parsed.id);
           }
