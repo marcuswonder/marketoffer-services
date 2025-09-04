@@ -24,11 +24,54 @@ export async function initDb() {
     );
 
     CREATE INDEX IF NOT EXISTS job_events_job_id_idx ON job_events(job_id);
+
+    -- Store enriched CH people and their appointments for downstream processing
+    CREATE TABLE IF NOT EXISTS ch_people (
+      id BIGSERIAL PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      person_key TEXT NOT NULL,
+      contact_id TEXT,
+      first_name TEXT,
+      middle_names TEXT,
+      last_name TEXT,
+      full_name TEXT,
+      dob_month INTEGER,
+      dob_year INTEGER,
+      dob_string TEXT,
+      officer_ids TEXT[],
+      status TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(job_id, person_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS ch_appointments (
+      id BIGSERIAL PRIMARY KEY,
+      person_id BIGINT NOT NULL REFERENCES ch_people(id) ON DELETE CASCADE,
+      appointment_id TEXT NOT NULL,
+      company_number TEXT,
+      company_name TEXT,
+      registered_address TEXT,
+      registered_postcode TEXT,
+      sic_codes TEXT[],
+      verified_company_website JSONB,
+      verified_company_linkedIns JSONB,
+      company_website_verification JSONB,
+      company_linkedIn_verification JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(person_id, appointment_id)
+    );
   `);
 }
 
 export async function startJob(opts: { jobId: string; queue: string; name: string; payload?: any }) {
   const { jobId, queue, name, payload } = opts;
+  console.log('jobId in startJob in lib/progress.ts', jobId);
+  console.log('queue in startJob in lib/progress.ts', queue);
+  console.log('name in startJob in lib/progress.ts', name);
+  console.log('payload in startJob in lib/progress.ts', payload);   
+  
   await query(
     `INSERT INTO job_progress(job_id, queue, name, status, data)
      VALUES ($1,$2,$3,'running',$4)
@@ -63,4 +106,3 @@ export async function failJob(jobId: string, err: any) {
     logger.error({ jobId, e: String(e) }, 'Failed to record job failure');
   }
 }
-

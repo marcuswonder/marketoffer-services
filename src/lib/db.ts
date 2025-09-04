@@ -10,6 +10,7 @@ export async function query<T = any>(text: string, params?: any[]): Promise<{ ro
   const client = await pool.connect();
   try {
     const res = await client.query(text, params);
+    // console.log('res in query in lib/db.ts', res);
     return res as any;
   } finally {
     client.release();
