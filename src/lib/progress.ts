@@ -35,6 +35,7 @@ export async function initDb() {
       middle_names TEXT,
       last_name TEXT,
       full_name TEXT,
+      nationality TEXT,
       dob_month INTEGER,
       dob_year INTEGER,
       dob_string TEXT,
@@ -51,6 +52,7 @@ export async function initDb() {
       appointment_id TEXT NOT NULL,
       company_number TEXT,
       company_name TEXT,
+      company_status TEXT,
       registered_address TEXT,
       registered_postcode TEXT,
       sic_codes TEXT[],
@@ -62,6 +64,10 @@ export async function initDb() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE(person_id, appointment_id)
     );
+
+    -- Backfill columns for existing deployments
+    ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS nationality TEXT;
+    ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS company_status TEXT;
   `);
 }
 

@@ -126,6 +126,12 @@ export default new Worker("ch-appointments", async job => {
         console.log("appts in initDB in workers/chAppointments.ts", appts);
 
         const enrichedAppointments: any[] = [];
+        // Attempt to capture nationality from the officer object or appointment sample (optional field)
+        const nationality: string | null = (o as any)?.nationality
+          ? String((o as any).nationality).trim()
+          : (appts?.[0]?.nationality || appts?.[0]?.person?.nationality || appts?.[0]?.officer?.nationality
+              ? String(appts?.[0]?.nationality || appts?.[0]?.person?.nationality || appts?.[0]?.officer?.nationality).trim()
+              : null);
         for (const it of appts) {
           const coNum = it?.appointed_to?.company_number || "";
           const coName = it?.appointed_to?.company_name || "";
@@ -143,6 +149,7 @@ export default new Worker("ch-appointments", async job => {
           enrichedAppointments.push({
             sic_codes: Array.isArray(co?.sic_codes) ? co.sic_codes : [],
             company_name: coName || co?.company_name || "",
+            company_status: it?.appointed_to?.company_status || co?.company_status || "",
             trading_name: null,
             appointment_id: it?.appointment_id || `${officerId}:${coNum}`,
             company_number: coNum,
@@ -267,6 +274,7 @@ export default new Worker("ch-appointments", async job => {
               enrichedAppointments.push({
                 sic_codes: Array.isArray(co?.sic_codes) ? co.sic_codes : [],
                 company_name: coName || co?.company_name || "",
+                company_status: it?.appointed_to?.company_status || co?.company_status || "",
                 trading_name: null,
                 appointment_id: it?.appointment_id || `${relId}:${coNum}`,
                 company_number: coNum,
@@ -315,6 +323,7 @@ export default new Worker("ch-appointments", async job => {
             contact_id: contactId || null,
             dob_string: dobString,
             first_name: first,
+            nationality: nationality || null,
             officer_ids: [officerId, ...extraOfficerIds].filter(Boolean),
             appointments: enrichedAppointments,
             middle_names: middle || null,
@@ -418,10 +427,14 @@ export default new Worker("ch-appointments", async job => {
         ].join('|');
         const officerIds = Array.isArray(e.officer_ids) ? e.officer_ids : [];
         const { rows: personRows } = await query<{ id: number }>(
-          `INSERT INTO ch_people(job_id, person_key, contact_id, first_name, middle_names, last_name, full_name, dob_month, dob_year, dob_string, officer_ids, status)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          `INSERT INTO ch_people(job_id, person_key, contact_id, first_name, middle_names, last_name, full_name, dob_month, dob_year, dob_string, officer_ids, nationality, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
            ON CONFLICT (job_id, person_key)
-           DO UPDATE SET contact_id=EXCLUDED.contact_id, officer_ids=EXCLUDED.officer_ids, status=EXCLUDED.status, updated_at=now()
+           DO UPDATE SET contact_id=EXCLUDED.contact_id,
+                         officer_ids=EXCLUDED.officer_ids,
+                         nationality=EXCLUDED.nationality,
+                         status=EXCLUDED.status,
+                         updated_at=now()
            RETURNING id`,
           [
             job.id as string,
@@ -435,6 +448,7 @@ export default new Worker("ch-appointments", async job => {
             e.dob_year || null,
             e.dob_string || null,
             officerIds.length ? officerIds : null,
+            e.nationality || null,
             f.status || 'Found via CH'
           ]
         );
@@ -443,12 +457,13 @@ export default new Worker("ch-appointments", async job => {
           for (const a of e.appointments) {
             totalAppts++;
             await query(
-              `INSERT INTO ch_appointments(person_id, appointment_id, company_number, company_name, registered_address, registered_postcode, sic_codes,
+              `INSERT INTO ch_appointments(person_id, appointment_id, company_number, company_name, company_status, registered_address, registered_postcode, sic_codes,
                                            verified_company_website, verified_company_linkedIns, company_website_verification, company_linkedIn_verification)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                ON CONFLICT (person_id, appointment_id)
                DO UPDATE SET company_number=EXCLUDED.company_number,
                              company_name=EXCLUDED.company_name,
+                             company_status=EXCLUDED.company_status,
                              registered_address=EXCLUDED.registered_address,
                              registered_postcode=EXCLUDED.registered_postcode,
                              sic_codes=EXCLUDED.sic_codes,
@@ -462,6 +477,7 @@ export default new Worker("ch-appointments", async job => {
                 a.appointment_id || null,
                 a.company_number || null,
                 a.company_name || null,
+                a.company_status || null,
                 a.registered_address || null,
                 a.registered_postcode || null,
                 Array.isArray(a.sic_codes) ? a.sic_codes : null,
