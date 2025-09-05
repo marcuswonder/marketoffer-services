@@ -1,0 +1,15 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "MarketOffer Postgres",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "marketoffer_linkedin_scraper",
+      "Username": "marketoffer",
+      "SSLMode": "prefer",
+      "ConnectNow": true
+    }
+  }
+}
+

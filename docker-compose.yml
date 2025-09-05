@@ -1,34 +1,74 @@
 services:
   web:
+    profiles: ["app"]
     build: .
-    command: sh -c "npm run build && node dist/api/index.js"
+    command: npm start
     ports:
       - "3000:3000"
-    env_file: .env
     depends_on:
-      - redis
       - postgres
+      - redis
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      PORT: ${PORT}
+      # DB
+      DATABASE_URL: ${DATABASE_URL}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Redis / flags
+      REDIS_URL: ${REDIS_URL}
+      WRITE_TO_AIRTABLE: ${WRITE_TO_AIRTABLE}
   worker-ch:
+    profiles: ["workers"]
     build: .
     command: sh -c "npm run build && node dist/workers/chAppointments.js"
-    env_file: .env
     depends_on:
       - redis
       - postgres
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_URL: ${REDIS_URL}
+      WRITE_TO_AIRTABLE: ${WRITE_TO_AIRTABLE}
   worker-company:
+    profiles: ["workers"]
     build: .
     command: sh -c "npm run build && node dist/workers/companyDiscovery.js"
-    env_file: .env
     depends_on:
       - redis
       - postgres
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_URL: ${REDIS_URL}
+      WRITE_TO_AIRTABLE: ${WRITE_TO_AIRTABLE}
   worker-person:
+    profiles: ["workers"]
     build: .
     command: sh -c "npm run build && node dist/workers/personLinkedin.js"
-    env_file: .env
     depends_on:
       - redis
       - postgres
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_URL: ${REDIS_URL}
+      WRITE_TO_AIRTABLE: ${WRITE_TO_AIRTABLE}
   redis:
     image: redis:7-alpine
     ports:
@@ -36,25 +76,25 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-app}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
-      POSTGRES_DB: ${POSTGRES_DB:-app}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
   pgadmin:
-    image: dpage/pgadmin4:latest
-    env_file: .env
+    image: dpage/pgadmin4:8.10
     environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
     ports:
       - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
     depends_on:
       - postgres
-    volumes:
-      - pgadmin:/var/lib/pgadmin
 volumes:
   pgdata:
-  pgadmin:
+  pgadmin_data:

@@ -1,8 +1,16 @@
 import { Pool } from 'pg';
 import { logger } from './logger.js';
 
-const DEFAULT_URL = 'postgres://app:app@postgres:5432/app';
-const DATABASE_URL = process.env.DATABASE_URL || DEFAULT_URL;
+// Build the connection string from environment variables, falling back to sensible defaults.
+// This avoids the old hardcoded app:app@app/app values.
+const PGHOST = process.env.POSTGRES_HOST || 'postgres';
+const PGPORT = process.env.POSTGRES_PORT || '5432';
+const PGUSER = process.env.POSTGRES_USER || 'app';
+const PGPASSWORD = process.env.POSTGRES_PASSWORD || 'app';
+const PGDATABASE = process.env.POSTGRES_DB || 'app';
+
+const FALLBACK_URL = `postgres://${encodeURIComponent(PGUSER)}:${encodeURIComponent(PGPASSWORD)}@${PGHOST}:${PGPORT}/${PGDATABASE}`;
+const DATABASE_URL = process.env.DATABASE_URL || FALLBACK_URL;
 
 export const pool = new Pool({ connectionString: DATABASE_URL });
 
@@ -31,4 +39,3 @@ export async function ensureConnection(retries = 10, delayMs = 1000) {
   // final try to throw
   await query('select 1');
 }
-
