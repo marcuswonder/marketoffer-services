@@ -16,6 +16,8 @@ type JobPayload = {
 
 const BEE_KEY = process.env.SCRAPINGBEE_API_KEY || "";
 const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
+const BEE_MAX_PAGES = Number(process.env.SITEFETCH_BEE_MAX_PAGES || 1); // cap Bee calls per job
+const STATIC_TIMEOUT_MS = Number(process.env.SITEFETCH_STATIC_TIMEOUT_MS || 7000);
 
 const COMMON_PATHS = [
   "/",
@@ -44,12 +46,28 @@ function buildBeeUrl(target: string) {
   return u.toString();
 }
 
-async function fetchHtml(targetUrl: string): Promise<{ status: number; html: string }> {
+async function fetchBeeHtml(targetUrl: string): Promise<{ status: number; html: string }> {
   if (!BEE_KEY) throw new Error("Missing SCRAPINGBEE_API_KEY");
   const beeUrl = buildBeeUrl(targetUrl);
   const res = await fetch(beeUrl, { method: "GET" });
   const html = await res.text();
   return { status: res.status, html };
+}
+
+async function fetchStaticHtml(targetUrl: string): Promise<{ status: number; html: string; contentType: string | null }> {
+  try {
+    const res = await fetch(targetUrl, {
+      method: "GET",
+      redirect: "follow" as any,
+      headers: { "accept": "text/html,application/xhtml+xml" },
+      signal: (AbortSignal as any).timeout ? (AbortSignal as any).timeout(STATIC_TIMEOUT_MS) : undefined
+    } as any);
+    const ct = res.headers.get("content-type");
+    const text = await res.text();
+    return { status: res.status, html: text || "", contentType: ct };
+  } catch {
+    return { status: 0, html: "", contentType: null };
+  }
 }
 
 function extractBetween(html: string, re: RegExp): string[] {
@@ -157,6 +175,13 @@ function scoreOwnership(opts: {
   return { score: Math.min(1, score), rationale };
 }
 
+function findLabeledCompanyNumber(text: string): string | null {
+  // Look for phrases like "company number", "company no", "registered number" followed by an 8-digit or 2 letters + 6 digits id
+  const re = /(company\s*(number|no)\b|registered\s*(number|no)\b|reg(istration)?\s*(no|number)\b)[^A-Za-z0-9]{0,10}([A-Z]{2}\d{6}|\d{8})/i;
+  const m = text.match(re);
+  return m ? (m[6] || "").toUpperCase() : null;
+}
+
 async function llmFallback(host: string, htmlSample: string, companyName: string): Promise<{ score: number; rationale: string } | null> {
   if (!OPENAI_KEY) return null;
   try {
@@ -200,34 +225,70 @@ export default new Worker("site-fetch", async job => {
     let bestScore = 0;
     let bestRationale = "";
     const foundLinkedIns = new Set<string>();
+    const staticOk: Array<{ url: string; status: number; html: string }> = [];
+    const targetNum = (companyNumber || "").toUpperCase();
+    let abortHost = false;
+    let earlyAccepted = false;
 
+    // First pass: cheap static fetch to avoid ScrapingBee credits on obvious 404/robots/generic pages
     for (const url of urls) {
-      let html = "";
-      let status = 0;
-      try {
-        const r = await fetchHtml(url);
-        status = r.status;
-        html = r.html || "";
-      } catch (e) {
-        await logEvent(job.id as string, 'warn', 'Fetch failed', { url, error: String(e) });
-        continue;
+      const r = await fetchStaticHtml(url);
+      if (r.status >= 200 && r.status < 400 && r.html.length >= 200) {
+        staticOk.push({ url, status: r.status, html: r.html });
+        const sig = parseHtmlSignals(r.html);
+        for (const li of sig.linkedins) foundLinkedIns.add(li);
+        // Early decision: if page explicitly declares a different company number, abort further checks for this host
+        const labeled = findLabeledCompanyNumber(sig.textChunk);
+        if (labeled) {
+          if (targetNum && labeled !== targetNum) {
+            abortHost = true;
+            bestScore = 0;
+            bestRationale = `Company number mismatch: found ${labeled}`;
+            await logEvent(job.id as string, 'info', 'Early reject (mismatched company number)', { url, found: labeled, expected: targetNum });
+            break;
+          }
+          if (targetNum && labeled === targetNum) {
+            bestScore = 0.9;
+            bestRationale = 'Company number match';
+            earlyAccepted = true;
+            await logEvent(job.id as string, 'info', 'Early accept (company number match)', { url, found: labeled });
+            break;
+          }
+        }
+        const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
+        if (score > bestScore) { bestScore = score; bestRationale = rationale; }
       }
-      if (status < 200 || status >= 400 || html.length < 200) continue;
-
-      const sig = parseHtmlSignals(html);
-      for (const li of sig.linkedins) foundLinkedIns.add(li);
-      const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
-      if (score > bestScore) { bestScore = score; bestRationale = rationale; }
-      // small pacing to be respectful
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 250));
+      if (abortHost || earlyAccepted) break;
     }
 
-    // Optional LLM if unclear
-    if (bestScore < 0.5) {
-      const sampleUrl = `https://${host}/`;
+    if (!staticOk.length) {
+      await logEvent(job.id as string, 'info', 'No static pages reachable; skipping Bee', { host });
+    }
+
+    // Optional escalation to ScrapingBee: only if static confidence is low and we have a reachable candidate
+    if (!abortHost && bestScore < 0.6 && BEE_KEY && staticOk.length && BEE_MAX_PAGES > 0) {
+      let used = 0;
+      for (const candidate of staticOk.slice(0, BEE_MAX_PAGES)) {
+        const r = await fetchBeeHtml(candidate.url);
+        if (r.status >= 200 && r.status < 400 && r.html.length >= 200) {
+          const sig = parseHtmlSignals(r.html);
+          for (const li of sig.linkedins) foundLinkedIns.add(li);
+          const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
+          if (score > bestScore) { bestScore = score; bestRationale = `Bee: ${rationale}`; }
+        }
+        used++;
+        if (used >= BEE_MAX_PAGES) break;
+        await new Promise(r => setTimeout(r, 400));
+      }
+    }
+
+    // Optional LLM if still unclear
+    if (!abortHost && bestScore < 0.5) {
+      const sampleUrl = staticOk[0]?.url || `https://${host}/`;
       try {
-        const r = await fetchHtml(sampleUrl);
-        const txt = stripTags(r.html).slice(0, 8000);
+        const rr = staticOk[0]?.html ? { html: staticOk[0].html } : await fetchStaticHtml(sampleUrl);
+        const txt = stripTags((rr as any).html || "").slice(0, 8000);
         const ai = await llmFallback(host, txt, companyName);
         if (ai && ai.score > bestScore) { bestScore = ai.score; bestRationale = `LLM: ${ai.rationale}`; }
       } catch {}

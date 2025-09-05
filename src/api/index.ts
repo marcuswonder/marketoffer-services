@@ -6,7 +6,7 @@ import { router as progressRouter } from "./routes/progress.js";
 import { ExpressAdapter } from "@bull-board/express";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
 import { createBullBoard } from "@bull-board/api";
-import { chQ, companyQ, personQ } from "../queues/index.js";
+import { chQ, companyQ, personQ, siteFetchQ } from "../queues/index.js";
 import { initDb } from "../lib/progress.js";
 
 await initDb();
@@ -22,7 +22,12 @@ app.use("/api", progressRouter);
 const serverAdapter = new ExpressAdapter();
 serverAdapter.setBasePath("/admin/queues");
 createBullBoard({
-  queues: [new BullMQAdapter(chQ), new BullMQAdapter(companyQ), new BullMQAdapter(personQ)],
+  queues: [
+    new BullMQAdapter(chQ),
+    new BullMQAdapter(companyQ),
+    new BullMQAdapter(personQ),
+    new BullMQAdapter(siteFetchQ),
+  ],
   serverAdapter,
 });
 app.use("/admin/queues", serverAdapter.getRouter());
