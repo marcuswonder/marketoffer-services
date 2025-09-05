@@ -29,14 +29,21 @@ services:
       - redis
       - postgres
     environment:
+      # App DB
       DATABASE_URL: ${DATABASE_URL}
       POSTGRES_HOST: ${POSTGRES_HOST}
       POSTGRES_PORT: ${POSTGRES_PORT}
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Redis / flags
       REDIS_URL: ${REDIS_URL}
       WRITE_TO_AIRTABLE: ${WRITE_TO_AIRTABLE}
+      # External APIs
+      CH_API_BASE: ${CH_API_BASE}
+      CH_API_KEY: ${CH_API_KEY}
+      AIRTABLE_API_KEY: ${AIRTABLE_API_KEY}
+      AIRTABLE_BASE_ID: ${AIRTABLE_BASE_ID}
   worker-company:
     profiles: ["workers"]
     build: .
@@ -45,14 +52,20 @@ services:
       - redis
       - postgres
     environment:
+      # App DB
       DATABASE_URL: ${DATABASE_URL}
       POSTGRES_HOST: ${POSTGRES_HOST}
       POSTGRES_PORT: ${POSTGRES_PORT}
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Redis / flags
       REDIS_URL: ${REDIS_URL}
       WRITE_TO_AIRTABLE: ${WRITE_TO_AIRTABLE}
+      # External APIs
+      SERPER_API_KEY: ${SERPER_API_KEY}
+      AIRTABLE_API_KEY: ${AIRTABLE_API_KEY}
+      AIRTABLE_BASE_ID: ${AIRTABLE_BASE_ID}
   worker-person:
     profiles: ["workers"]
     build: .
@@ -61,14 +74,20 @@ services:
       - redis
       - postgres
     environment:
+      # App DB
       DATABASE_URL: ${DATABASE_URL}
       POSTGRES_HOST: ${POSTGRES_HOST}
       POSTGRES_PORT: ${POSTGRES_PORT}
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Redis / flags
       REDIS_URL: ${REDIS_URL}
       WRITE_TO_AIRTABLE: ${WRITE_TO_AIRTABLE}
+      # External APIs
+      SERPER_API_KEY: ${SERPER_API_KEY}
+      AIRTABLE_API_KEY: ${AIRTABLE_API_KEY}
+      AIRTABLE_BASE_ID: ${AIRTABLE_BASE_ID}
   redis:
     image: redis:7-alpine
     ports:
