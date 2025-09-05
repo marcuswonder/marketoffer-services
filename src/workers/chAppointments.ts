@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
 import { connection } from "../queues/index.js";
+import { companyQ } from "../queues/index.js";
 import { httpGetJson } from "../lib/http.js";
 import { parseOfficerName, officerIdFromUrl, monthStr, nameMatches, normalizeWord } from "../lib/normalize.js";
 import { batchCreate } from "../lib/airtable.js";
@@ -497,8 +498,59 @@ export default new Worker("ch-appointments", async job => {
       await logEvent(job.id as string, 'error', 'Failed to persist CH results to Postgres', { error: String(e) });
     }
     const enriched = peopleRecords.map((r) => r._enriched);
-    await completeJob(job.id as string, { companyNumber, matches: enriched.length, enriched, pg: { people: pgPeopleWritten, appointments: pgAppointmentsWritten } });
-    logger.info({ companyNumber, matches: enriched.length, pg: { people: pgPeopleWritten, appointments: pgAppointmentsWritten } }, "CH processed");
+
+    // Build a unique company list from all appointments and prioritise ACTIVE
+    type CoItem = { company_number: string; company_name: string; company_status: string; registered_address?: string; registered_postcode?: string };
+    const coMap = new Map<string, CoItem>();
+    for (const e of enriched) {
+      const apps: any[] = Array.isArray(e?.appointments) ? e.appointments : [];
+      for (const a of apps) {
+        const num = (a?.company_number || "").toString();
+        if (!num) continue;
+        const status = (a?.company_status || "").toString().toLowerCase();
+        const item: CoItem = {
+          company_number: num,
+          company_name: (a?.company_name || "").toString(),
+          company_status: status,
+          registered_address: (a?.registered_address || "").toString(),
+          registered_postcode: (a?.registered_postcode || "").toString(),
+        };
+        const existing = coMap.get(num);
+        // Prefer ACTIVE over any existing status
+        if (!existing || (existing.company_status !== 'active' && item.company_status === 'active')) {
+          coMap.set(num, item);
+        }
+      }
+    }
+
+    const allCompanies = Array.from(coMap.values());
+    const activeCompanies = allCompanies.filter(c => c.company_status === 'active');
+    const laterCompanies = allCompanies.filter(c => c.company_status !== 'active');
+
+    // Enqueue discovery jobs: ACTIVE immediately at higher priority, others later with delay
+    let enqActive = 0, enqLater = 0;
+    for (const c of activeCompanies) {
+      const jobId = `co:${c.company_number}`;
+      await companyQ.add(
+        "discover",
+        { companyNumber: c.company_number, companyName: c.company_name, address: c.registered_address, postcode: c.registered_postcode },
+        { jobId, priority: 1, attempts: 5, backoff: { type: "exponential", delay: 1500 } }
+      );
+      enqActive++;
+    }
+    for (const c of laterCompanies) {
+      const jobId = `co:${c.company_number}`;
+      await companyQ.add(
+        "discover",
+        { companyNumber: c.company_number, companyName: c.company_name, address: c.registered_address, postcode: c.registered_postcode },
+        { jobId, priority: 10, delay: 10 * 60 * 1000, attempts: 5, backoff: { type: "exponential", delay: 2000 } }
+      );
+      enqLater++;
+    }
+    await logEvent(job.id as string, 'info', 'Enqueued company-discovery follow-ups', { active: enqActive, later: enqLater });
+
+    await completeJob(job.id as string, { companyNumber, matches: enriched.length, enriched, pg: { people: pgPeopleWritten, appointments: pgAppointmentsWritten }, enqueued: { active: enqActive, later: enqLater } });
+    logger.info({ companyNumber, matches: enriched.length, pg: { people: pgPeopleWritten, appointments: pgAppointmentsWritten }, enqueued: { active: enqActive, later: enqLater } }, "CH processed");
   } catch (err) {
     await failJob(job.id as string, err);
     logger.error({ companyNumber, err: String(err) }, 'CH worker failed');

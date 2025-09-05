@@ -88,6 +88,27 @@ services:
       SERPER_API_KEY: ${SERPER_API_KEY}
       AIRTABLE_API_KEY: ${AIRTABLE_API_KEY}
       AIRTABLE_BASE_ID: ${AIRTABLE_BASE_ID}
+  worker-sitefetch:
+    profiles: ["workers"]
+    build: .
+    command: sh -c "npm run build && node dist/workers/siteFetch.js"
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      # App DB
+      DATABASE_URL: ${DATABASE_URL}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Redis / flags
+      REDIS_URL: ${REDIS_URL}
+      WRITE_TO_AIRTABLE: ${WRITE_TO_AIRTABLE}
+      # External APIs
+      SCRAPINGBEE_API_KEY: ${SCRAPINGBEE_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
   redis:
     image: redis:7-alpine
     ports:

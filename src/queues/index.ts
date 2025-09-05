@@ -11,8 +11,10 @@ export const connection = new IORedis(REDIS_URL, {
 export const chQ = new Queue("ch-appointments", { connection });
 export const companyQ = new Queue("company-discovery", { connection });
 export const personQ = new Queue("person-linkedin", { connection });
+export const siteFetchQ = new Queue("site-fetch", { connection });
 
 // Schedulers to handle delayed/retried jobs
 new Queue("ch-appointments", { connection });
 new Queue("company-discovery", { connection });
 new Queue("person-linkedin", { connection });
+new Queue("site-fetch", { connection });

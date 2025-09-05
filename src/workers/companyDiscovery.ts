@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
 import { connection } from "../queues/index.js";
+import { siteFetchQ } from "../queues/index.js";
 import { cleanCompanyName, baseHost } from "../lib/normalize.js";
 import { batchCreate } from "../lib/airtable.js";
 import { logger } from "../lib/logger.js";
@@ -12,7 +13,9 @@ import path from "path";
 const SERPER_API_KEY = process.env.SERPER_API_KEY || "";
 const WRITE_TO_AIRTABLE = (process.env.WRITE_TO_AIRTABLE || "").toLowerCase() === 'true';
 const genericHostsPath = path.join(process.cwd(), "config", "genericHosts.json");
-const genericHosts:Set<string> = new Set(JSON.parse(fs.readFileSync(genericHostsPath, "utf-8")));
+const genericHosts:Set<string> = new Set(
+  (JSON.parse(fs.readFileSync(genericHostsPath, "utf-8")) as string[]).map(s => s.toLowerCase())
+);
 
 async function serperSearch(q: string) {
   const res = await fetch("https://google.serper.dev/search", {
@@ -23,6 +26,12 @@ async function serperSearch(q: string) {
   if (!res.ok) throw new Error(`Serper ${res.status}`);
   // return res.json();
   return (await res.json()) as any;
+}
+
+function asArray<T = any>(val: any): T[] {
+  if (Array.isArray(val)) return val as T[];
+  if (val && typeof val === 'object') return [val as T];
+  return [] as T[];
 }
 
 await initDb();
@@ -38,17 +47,34 @@ export default new Worker("company-discovery", async job => {
     await logEvent(job.id as string, 'info', 'Built queries', { queries });
 
     const hosts = new Set<string>();
+    const genericList = Array.from(genericHosts);
+    const isGeneric = (host: string) => {
+      if (genericHosts.has(host)) return true;
+      for (const g of genericList) {
+        if (host === g || host.endsWith(`.${g}`)) return true;
+      }
+      return false;
+    };
     for (const q of queries) {
       const data = await serperSearch(q);
-      // const items = [...(data.organic || []), ...(data.peopleAlsoSearch || []), ...(data.knowledgeGraph || [])];
-      const items = [...((data as any).organic || []), ...((data as any).peopleAlsoSearch || []), ...((data as any).knowledgeGraph || [])];
-      await logEvent(job.id as string, 'debug', 'Serper results', { q, counts: { organic: (data as any).organic?.length || 0, peopleAlsoSearch: (data as any).peopleAlsoSearch?.length || 0, knowledgeGraph: (data as any).knowledgeGraph?.length || 0 } });
+      const organic = asArray((data as any).organic);
+      const peopleAlso = asArray((data as any).peopleAlsoSearch);
+      const knowledge = asArray((data as any).knowledgeGraph);
+      const items = [...organic, ...peopleAlso, ...knowledge];
+      await logEvent(job.id as string, 'debug', 'Serper results', {
+        q,
+        counts: {
+          organic: organic.length,
+          peopleAlsoSearch: peopleAlso.length,
+          knowledgeGraph: knowledge.length,
+        }
+      });
       for (const it of items) {
         const url = it.link || it.url || "";
         if (!url) continue;
         const host = baseHost(url);
         if (!host) continue;
-        if (genericHosts.has(host)) continue;
+        if (isGeneric(host)) continue;
         hosts.add(host);
       }
     }
@@ -72,8 +98,21 @@ export default new Worker("company-discovery", async job => {
       }
     }
 
-    await completeJob(job.id as string, { companyNumber, companyName, potential });
-    logger.info({ companyNumber, potential: potential.length }, "Company discovery done");
+    // Enqueue site-fetch validations for each potential host
+    let enq = 0;
+    for (const host of potential) {
+      const jobId = `sf:${companyNumber}:${host}`;
+      await siteFetchQ.add(
+        'audit',
+        { companyNumber, companyName, address, postcode, host },
+        { jobId, attempts: 3, backoff: { type: 'exponential', delay: 2000 } }
+      );
+      enq++;
+    }
+    await logEvent(job.id as string, 'info', 'Enqueued site-fetch audits', { count: enq });
+
+    await completeJob(job.id as string, { companyNumber, companyName, potential, site_fetch_enqueued: potential.length });
+    logger.info({ companyNumber, potential: potential.length, siteFetch: potential.length }, "Company discovery done");
   } catch (err) {
     await failJob(job.id as string, err);
     logger.error({ companyNumber, err: String(err) }, "Company discovery failed");
