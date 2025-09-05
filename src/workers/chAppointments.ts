@@ -186,7 +186,8 @@ export default new Worker("ch-appointments", async job => {
             const nameRaw = (item?.title || item?.name || "") as string;
             const nm = parseOfficerName(nameRaw);
             const links = item?.links || {};
-            const apptUrl = links?.officer?.appointments || links?.appointments || "";
+            // CH search results commonly expose the appointments URL at links.self
+            const apptUrl = links?.officer?.appointments || links?.appointments || links?.self || "";
             const id = officerIdFromUrl(apptUrl) || null;
             const dobObj = item?.date_of_birth || item?.items?.date_of_birth || null;
             const dobMonth = typeof dobObj?.month === 'number' ? dobObj.month : null;
@@ -385,8 +386,8 @@ export default new Worker("ch-appointments", async job => {
     // Persist minimal records to Airtable only after we have full enriched results
     console.log("peopleRecords before Database commit/Airtable write in initDB in workers/chAppointments.ts length", peopleRecords.length);
     console.log("peopleRecords before Database commit/Airtable write in initDB in workers/chAppointments.ts", peopleRecords);
-    console.log("peopleRecords[0].appointments before Database commit/Airtable write in initDB in workers/chAppointments.ts length", peopleRecords[0]?.appointments?.length);
-    console.log("peopleRecords[0].appointments before Database commit/Airtable write in initDB in workers/chAppointments.ts", peopleRecords[0]?.appointments);
+    console.log("peopleRecords[0].peopleRecords[0]?._enriched?.appointments.length before Database commit/Airtable write in initDB in workers/chAppointments.ts", peopleRecords[0]?._enriched?.appointments.length);
+    console.log("peopleRecords[0]?._enriched?.appointments before Database commit/Airtable write in initDB in workers/chAppointments.ts", peopleRecords[0]?._enriched?.appointments);
 
     if (WRITE_TO_AIRTABLE) {
       if (peopleRecords.length) await batchCreate("People", peopleRecords.map(({ fields }) => ({ fields })));
