@@ -538,19 +538,11 @@ export default new Worker("ch-appointments", async job => {
       );
       enqActive++;
     }
-    for (const c of laterCompanies) {
-      const jobId = `co:${c.company_number}`;
-      await companyQ.add(
-        "discover",
-        { companyNumber: c.company_number, companyName: c.company_name, address: c.registered_address, postcode: c.registered_postcode },
-        { jobId, priority: 10, delay: 10 * 60 * 1000, attempts: 5, backoff: { type: "exponential", delay: 2000 } }
-      );
-      enqLater++;
-    }
-    await logEvent(job.id as string, 'info', 'Enqueued company-discovery follow-ups', { active: enqActive, later: enqLater });
+    // Skip discovery for non-active (e.g., dissolved) companies
+    await logEvent(job.id as string, 'info', 'Enqueued company-discovery follow-ups (active only)', { active: enqActive, skipped_non_active: laterCompanies.length });
 
     await completeJob(job.id as string, { companyNumber, matches: enriched.length, enriched, pg: { people: pgPeopleWritten, appointments: pgAppointmentsWritten }, enqueued: { active: enqActive, later: enqLater } });
-    logger.info({ companyNumber, matches: enriched.length, pg: { people: pgPeopleWritten, appointments: pgAppointmentsWritten }, enqueued: { active: enqActive, later: enqLater } }, "CH processed");
+    logger.info({ companyNumber, matches: enriched.length, pg: { people: pgPeopleWritten, appointments: pgAppointmentsWritten }, enqueued: { active: enqActive, skipped_non_active: laterCompanies.length } }, "CH processed");
   } catch (err) {
     await failJob(job.id as string, err);
     logger.error({ companyNumber, err: String(err) }, 'CH worker failed');

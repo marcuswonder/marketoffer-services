@@ -1,10 +1,12 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
 import { connection } from "../queues/index.js";
+import { personQ } from "../queues/index.js";
 import { initDb, startJob, logEvent, completeJob, failJob } from "../lib/progress.js";
 import { logger } from "../lib/logger.js";
 import { fetch } from "undici";
 import { cleanCompanyName, baseHost } from "../lib/normalize.js";
+import { query } from "../lib/db.js";
 
 type JobPayload = {
   host: string;
@@ -313,6 +315,137 @@ export default new Worker("site-fetch", async job => {
       website_validations,
       linkedins: Array.from(foundLinkedIns)
     });
+
+    // Persist results into ch_appointments for this company
+    try {
+      const addWebsites = JSON.stringify(validated_websites);
+      const addVerifications = JSON.stringify(website_validations);
+      const addLinkedIns = JSON.stringify(Array.from(foundLinkedIns));
+      await query(
+        `UPDATE ch_appointments
+           SET
+             verified_company_website = (
+               SELECT CASE WHEN jsonb_typeof(COALESCE(verified_company_website, '[]'::jsonb)) = 'array'
+                           THEN (
+                             SELECT jsonb_agg(DISTINCT e)
+                               FROM jsonb_array_elements(COALESCE(verified_company_website, '[]'::jsonb) || $1::jsonb) AS e
+                           )
+                           ELSE $1::jsonb
+                      END
+             ),
+             company_website_verification = (
+               SELECT CASE WHEN jsonb_typeof(COALESCE(company_website_verification, '[]'::jsonb)) = 'array'
+                           THEN (
+                             SELECT jsonb_agg(DISTINCT e)
+                               FROM jsonb_array_elements(COALESCE(company_website_verification, '[]'::jsonb) || $2::jsonb) AS e
+                           )
+                           ELSE $2::jsonb
+                      END
+             ),
+             verified_company_linkedIns = (
+               SELECT CASE WHEN jsonb_typeof(COALESCE(verified_company_linkedIns, '[]'::jsonb)) = 'array'
+                           THEN (
+                             SELECT jsonb_agg(DISTINCT e)
+                               FROM jsonb_array_elements(COALESCE(verified_company_linkedIns, '[]'::jsonb) || $3::jsonb) AS e
+                           )
+                           ELSE $3::jsonb
+                      END
+             ),
+             updated_at = now()
+         WHERE company_number = $4`,
+        [addWebsites, addVerifications, addLinkedIns, companyNumber]
+      );
+      await logEvent(job.id as string, 'info', 'Updated ch_appointments with siteFetch results', {
+        companyNumber,
+        websites_added: validated_websites.length,
+        linkedins_added: Array.from(foundLinkedIns).length
+      });
+    } catch (e) {
+      await logEvent(job.id as string, 'error', 'Failed to update ch_appointments with siteFetch results', { error: String(e), companyNumber });
+    }
+
+    // After this job is marked completed, check if any site-fetch jobs for this company are still running
+    try {
+      const { rows: runningRows } = await query<{ c: string }>(
+        `SELECT COUNT(*)::int AS c
+           FROM job_progress
+          WHERE queue = 'site-fetch'
+            AND data->>'companyNumber' = $1
+            AND status = 'running'`,
+        [companyNumber]
+      );
+      const running = Number(runningRows?.[0]?.c || 0);
+      if (running === 0) {
+        // Aggregate websites/linkedin across all appointments for this company
+        const aggSql = `
+          WITH w AS (
+            SELECT jsonb_array_elements(COALESCE(verified_company_website, '[]'::jsonb)) AS v
+              FROM ch_appointments
+             WHERE company_number = $1
+          ),
+          l AS (
+            SELECT jsonb_array_elements(COALESCE(verified_company_linkedIns, '[]'::jsonb)) AS v
+              FROM ch_appointments
+             WHERE company_number = $1
+          )
+          SELECT
+            COALESCE((SELECT jsonb_agg(DISTINCT v) FROM w), '[]'::jsonb) AS websites,
+            COALESCE((SELECT jsonb_agg(DISTINCT v) FROM l), '[]'::jsonb) AS linkedins`;
+        const { rows: aggRows } = await query<any>(aggSql, [companyNumber]);
+        const aggWebsites: string[] = Array.isArray(aggRows?.[0]?.websites) ? aggRows[0].websites : [];
+        const aggLinkedIns: string[] = Array.isArray(aggRows?.[0]?.linkedins) ? aggRows[0].linkedins : [];
+
+        // Find distinct people with appointments in this company
+        const { rows: people } = await query<{ id: number; first_name: string | null; middle_names: string | null; last_name: string | null; dob_string: string | null }>(
+          `SELECT DISTINCT p.id, p.first_name, p.middle_names, p.last_name, p.dob_string
+             FROM ch_people p
+             JOIN ch_appointments a ON a.person_id = p.id
+            WHERE a.company_number = $1`,
+          [companyNumber]
+        );
+
+        // Grab a representative company name for context (latest entry wins)
+        const { rows: cnRows } = await query<{ company_name: string }>(
+          `SELECT company_name
+             FROM ch_appointments
+            WHERE company_number = $1 AND COALESCE(company_name,'') <> ''
+            ORDER BY updated_at DESC
+            LIMIT 1`,
+          [companyNumber]
+        );
+        const companyNameForContext = (cnRows?.[0]?.company_name || '').toString();
+
+        let enqueued = 0;
+        for (const p of people) {
+          const fullName = [p.first_name, p.middle_names, p.last_name].filter(Boolean).join(' ');
+          if (!fullName.trim()) continue;
+          const jobId = `person:${p.id}:${companyNumber}`;
+          await personQ.add(
+            'discover',
+            {
+              person: {
+                firstName: p.first_name || '',
+                middleNames: p.middle_names || '',
+                lastName: p.last_name || '',
+                dob: p.dob_string || ''
+              },
+              context: {
+                companyNumber,
+                companyName: companyNameForContext,
+                websites: aggWebsites,
+                companyLinkedIns: aggLinkedIns
+              }
+            },
+            { jobId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } }
+          );
+          enqueued++;
+        }
+        await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after siteFetch aggregation', { companyNumber, people: people.length, enqueued });
+      }
+    } catch (e) {
+      await logEvent(job.id as string, 'error', 'Aggregation/queue after siteFetch failed', { error: String(e), companyNumber });
+    }
+
     logger.info({ host, score: bestScore, validates: validated_websites.length }, 'Site fetch done');
   } catch (err) {
     await failJob(job.id as string, err);

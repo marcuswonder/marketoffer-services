@@ -21,25 +21,55 @@ async function serperSearch(q: string) {
 }
 
 await initDb();
+type PersonSearchPayload = {
+  personId?: string;
+  person?: { firstName: string; middleNames?: string; lastName: string; dob?: string };
+  context?: { companyNumber?: string; websites?: string[]; companyLinkedIns?: string[] };
+};
+
 export default new Worker("person-linkedin", async job => {
-  const { personId } = job.data as { personId: string };
+  const { personId, person, context } = job.data as PersonSearchPayload;
   await startJob({ jobId: job.id as string, queue: 'person-linkedin', name: job.name, payload: job.data });
   try {
-    const person = await base("People").find(personId);
-    const fullName = [person.get("first_name"), person.get("middle_names"), person.get("last_name")].filter(Boolean).join(" ");
-    const dob = person.get("dob_string") as string | undefined;
-    await logEvent(job.id as string, 'info', 'Loaded person', { personId, fullName, hasDob: Boolean(dob) });
+    let fullName = "";
+    let dob: string | undefined;
 
-    // Starter strategy: name-focused search (you can enhance to include trading names later)
+    if (personId) {
+      const rec = await base("People").find(personId);
+      fullName = [rec.get("first_name"), rec.get("middle_names"), rec.get("last_name")].filter(Boolean).join(" ");
+      dob = rec.get("dob_string") as string | undefined;
+      await logEvent(job.id as string, 'info', 'Loaded person (Airtable)', { personId, fullName, hasDob: Boolean(dob) });
+    } else if (person) {
+      fullName = [person.firstName, person.middleNames, person.lastName].filter(Boolean).join(" ");
+      dob = person.dob || undefined;
+      await logEvent(job.id as string, 'info', 'Loaded person (payload)', { fullName, hasDob: Boolean(dob), context });
+    } else {
+      throw new Error('Missing personId or person payload');
+    }
+
+    // Build queries
     const queries: string[] = [];
-    queries.push(`${fullName} UK site:linkedin.com/in`);
-    if (dob) queries.push(`${fullName} ${dob} site:linkedin.com/in`);
-    await logEvent(job.id as string, 'info', 'Built queries', { queries });
+    if (fullName.trim()) {
+      queries.push(`${fullName} UK site:linkedin.com/in`);
+      if (dob) queries.push(`${fullName} ${dob} site:linkedin.com/in`);
+    }
+    const websites: string[] = Array.isArray(context?.websites) ? (context!.websites as string[]) : [];
+    const companyNameCtx: string = (context?.companyName || '').toString();
+    // Use any known company website hosts as additional disambiguation
+    for (const w of websites) {
+      const host = (w || '').toString().replace(/^https?:\/\//i, '').replace(/\/$/, '');
+      if (!host) continue;
+      if (fullName.trim()) queries.push(`${fullName} ${host} site:linkedin.com/in`);
+    }
+    if (companyNameCtx && fullName.trim()) {
+      queries.push(`${fullName} ${companyNameCtx} UK site:linkedin.com/in`);
+      queries.push(`${fullName} "${companyNameCtx}" site:linkedin.com/in`);
+    }
+    await logEvent(job.id as string, 'info', 'Built queries', { queries, context });
 
     const urls = new Set<string>();
     for (const q of queries) {
       const data = await serperSearch(q);
-      // for (const it of data.organic || []) {
       for (const it of (data as any).organic || []) {
         const link = it.link || "";
         if (link && link.includes("linkedin.com/in")) urls.add(link.split("?")[0]);
@@ -48,24 +78,19 @@ export default new Worker("person-linkedin", async job => {
       await new Promise(r => setTimeout(r, 1500)); // gentle pacing
     }
 
-    if (urls.size) {
-      if (WRITE_TO_AIRTABLE) {
-        await base("People").update(personId, { potential_linkedins: Array.from(urls) as any });
-      } else {
-        await logEvent(job.id as string, 'info', 'Airtable write skipped', {
-          reason: 'WRITE_TO_AIRTABLE=false',
-          table: 'People',
-          field: 'potential_linkedins',
-          count: Array.from(urls).length
-        });
-      }
+    if (urls.size && personId && WRITE_TO_AIRTABLE) {
+      await base("People").update(personId, { potential_linkedins: Array.from(urls) as any });
+    } else if (urls.size && !personId) {
+      await logEvent(job.id as string, 'info', 'Airtable write skipped (no personId)', { count: Array.from(urls).length });
+    } else if (urls.size && personId && !WRITE_TO_AIRTABLE) {
+      await logEvent(job.id as string, 'info', 'Airtable write skipped (flag false)', { count: Array.from(urls).length });
     }
 
-    await completeJob(job.id as string, { personId, results: Array.from(urls) });
-    logger.info({ personId, results: urls.size }, "Person LinkedIn discovery done");
+    await completeJob(job.id as string, { personId: personId || null, fullName, results: Array.from(urls), context });
+    logger.info({ personId: personId || null, results: urls.size }, "Person LinkedIn discovery done");
   } catch (err) {
     await failJob(job.id as string, err);
-    logger.error({ personId, err: String(err) }, 'Person LinkedIn worker failed');
+    logger.error({ err: String(err) }, 'Person LinkedIn worker failed');
     throw err;
   }
 }, { connection, concurrency: 1 });
