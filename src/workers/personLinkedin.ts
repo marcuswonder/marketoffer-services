@@ -24,7 +24,7 @@ await initDb();
 type PersonSearchPayload = {
   personId?: string;
   person?: { firstName: string; middleNames?: string; lastName: string; dob?: string };
-  context?: { companyNumber?: string; websites?: string[]; companyLinkedIns?: string[] };
+  context?: { companyNumber?: string; companyName?: string; websites?: string[]; companyLinkedIns?: string[]; personalLinkedIns?: string[] };
 };
 
 export default new Worker("person-linkedin", async job => {
@@ -55,6 +55,7 @@ export default new Worker("person-linkedin", async job => {
     }
     const websites: string[] = Array.isArray(context?.websites) ? (context!.websites as string[]) : [];
     const companyNameCtx: string = (context?.companyName || '').toString();
+    const personalSeeds: string[] = Array.isArray(context?.personalLinkedIns) ? (context!.personalLinkedIns as string[]) : [];
     // Use any known company website hosts as additional disambiguation
     for (const w of websites) {
       const host = (w || '').toString().replace(/^https?:\/\//i, '').replace(/\/$/, '');
@@ -65,7 +66,7 @@ export default new Worker("person-linkedin", async job => {
       queries.push(`${fullName} ${companyNameCtx} UK site:linkedin.com/in`);
       queries.push(`${fullName} "${companyNameCtx}" site:linkedin.com/in`);
     }
-    await logEvent(job.id as string, 'info', 'Built queries', { queries, context });
+    await logEvent(job.id as string, 'info', 'Built queries', { queries, context, personalSeeds: personalSeeds.length });
 
     const urls = new Set<string>();
     for (const q of queries) {
@@ -77,6 +78,9 @@ export default new Worker("person-linkedin", async job => {
       await logEvent(job.id as string, 'debug', 'Query processed', { q, found: Array.from(urls).length });
       await new Promise(r => setTimeout(r, 1500)); // gentle pacing
     }
+
+    // Seed with any personal LinkedIns we already have
+    for (const u of personalSeeds) if (u.includes('linkedin.com/in')) urls.add(u);
 
     if (urls.size && personId && WRITE_TO_AIRTABLE) {
       await base("People").update(personId, { potential_linkedins: Array.from(urls) as any });

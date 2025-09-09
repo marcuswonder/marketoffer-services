@@ -52,14 +52,17 @@ export async function initDb() {
       appointment_id TEXT NOT NULL,
       company_number TEXT,
       company_name TEXT,
+      trading_name TEXT,
       company_status TEXT,
       registered_address TEXT,
       registered_postcode TEXT,
       sic_codes TEXT[],
       verified_company_website JSONB,
       verified_company_linkedIns JSONB,
+      verified_director_linkedIns JSONB,
       company_website_verification JSONB,
       company_linkedIn_verification JSONB,
+      director_linkedIn_verification JSONB,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE(person_id, appointment_id)
@@ -68,6 +71,10 @@ export async function initDb() {
     -- Backfill columns for existing deployments
     ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS nationality TEXT;
     ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS company_status TEXT;
+    ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS trading_name TEXT;
+    ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS verified_director_linkedIns JSONB;
+    ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS director_linkedIn_verification JSONB;
+    CREATE INDEX IF NOT EXISTS ch_appointments_company_number_idx ON ch_appointments(company_number);
   `);
 }
 
