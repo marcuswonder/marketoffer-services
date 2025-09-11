@@ -150,27 +150,38 @@ type PersonSearchPayload = {
   personId?: string;
   person?: { firstName: string; middleNames?: string; lastName: string; dob?: string };
   context?: { companyNumber?: string; companyName?: string; websites?: string[]; companyLinkedIns?: string[]; personalLinkedIns?: string[] };
+  rootJobId?: string;
 };
 
 export default new Worker("person-linkedin", async job => {
-  const { personId, person, context } = job.data as PersonSearchPayload;
+  const { personId, person, context, rootJobId } = job.data as PersonSearchPayload;
   await startJob({ jobId: job.id as string, queue: 'person-linkedin', name: job.name, payload: job.data });
   try {
     let fullName = "";
     let dob: string | undefined;
+    let first = "";
+    let middle = "";
+    let last = "";
 
     if (personId) {
       const rec = await base("People").find(personId);
-      fullName = [rec.get("first_name"), rec.get("middle_names"), rec.get("last_name")].filter(Boolean).join(" ");
+      first = String(rec.get("first_name") || "");
+      middle = String(rec.get("middle_names") || "");
+      last = String(rec.get("last_name") || "");
+      fullName = [first, middle, last].filter(Boolean).join(" ");
       dob = rec.get("dob_string") as string | undefined;
-      await logEvent(job.id as string, 'info', 'Loaded person (Airtable)', { personId, fullName, hasDob: Boolean(dob) });
+      await logEvent(job.id as string, 'info', 'Loaded person (Airtable)', { personId, fullName, first, middle, last, hasDob: Boolean(dob) });
     } else if (person) {
-      fullName = [person.firstName, person.middleNames, person.lastName].filter(Boolean).join(" ");
+      first = person.firstName || "";
+      middle = person.middleNames || "";
+      last = person.lastName || "";
+      fullName = [first, middle, last].filter(Boolean).join(" ");
       dob = person.dob || undefined;
-      await logEvent(job.id as string, 'info', 'Loaded person (payload)', { fullName, hasDob: Boolean(dob), context });
+      await logEvent(job.id as string, 'info', 'Loaded person (payload)', { fullName, first, middle, last, hasDob: Boolean(dob), context });
     } else {
       throw new Error('Missing personId or person payload');
     }
+    const shortName = [first, last].filter(Boolean).join(' ').trim();
 
     // Build query seeds
     const websites: string[] = Array.isArray(context?.websites) ? (context!.websites as string[]) : [];
@@ -191,6 +202,19 @@ export default new Worker("person-linkedin", async job => {
       for (const t of tradingNames) personalQueries.push(`${fullName} ${t} UK site:linkedin.com/in`);
       for (const c of companyNames) personalQueries.push(`${fullName} ${c} UK site:linkedin.com/in`);
     }
+    // Also run searches excluding middle names (first + last only)
+    if (shortName && shortName !== fullName) {
+      personalQueries.push(`${shortName} UK site:linkedin.com/in`);
+      if (dob) personalQueries.push(`${shortName} ${dob} site:linkedin.com/in`);
+      if (tradingNames.length) personalQueries.push(`${shortName} ${tradingNames.join(' ')} UK site:linkedin.com/in`);
+      if (companyNames.length) personalQueries.push(`${shortName} ${companyNames.join(' ')} UK site:linkedin.com/in`);
+      for (const t of tradingNames) personalQueries.push(`${shortName} ${t} UK site:linkedin.com/in`);
+      for (const c of companyNames) personalQueries.push(`${shortName} ${c} UK site:linkedin.com/in`);
+    }
+    // De-duplicate queries to keep Serper usage efficient
+    const dedupPersonal = Array.from(new Set(personalQueries));
+    personalQueries.length = 0;
+    personalQueries.push(...dedupPersonal);
     if (companyNames.length) {
       for (const c of companyNames) companyQueries.push(`${c} UK site:linkedin.com/company`);
     }
@@ -201,6 +225,9 @@ export default new Worker("person-linkedin", async job => {
       tradingNames,
       companyNames
     });
+    if (rootJobId) {
+      try { await logEvent(rootJobId, 'info', 'Person LI built queries', { fullName, personalQueries: personalQueries.slice(0, 3), companyQueries: companyQueries.slice(0, 3) }); } catch {}
+    }
 
     type Hit = { url: string; title?: string; snippet?: string };
     const personalHits: Hit[] = [];
@@ -248,6 +275,9 @@ export default new Worker("person-linkedin", async job => {
       counts: { personal: personalSet.size, company: companySet.size },
       seeds: { personal: personalSeeds.length, company: companySeeds.length }
     });
+    if (rootJobId) {
+      try { await logEvent(rootJobId, 'info', 'Person LI aggregated candidates', { counts: { personal: personalSet.size, company: companySet.size } }); } catch {}
+    }
 
     // Score candidates with LLM
     const personalCandidates = Array.from(personalSet.values()).slice(0, PERSON_MAX_PERSONAL_CANDIDATES);
@@ -282,6 +312,9 @@ export default new Worker("person-linkedin", async job => {
       personal_top: personalScored.slice(0,3),
       company_top: companyScored.slice(0,3)
     });
+    if (rootJobId) {
+      try { await logEvent(rootJobId, 'info', 'Person LI scored candidates', { personal_top: personalScored.slice(0,3), company_top: companyScored.slice(0,3) }); } catch {}
+    }
 
     // Airtable write (optional): store top personal candidates
     if (personId && WRITE_TO_AIRTABLE) {
