@@ -45,7 +45,15 @@ export default new Worker("ch-appointments", async job => {
       const officers = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}/officers`, { headers: chHeaders() });
       // console.log("officers in initDB in workers/chAppointments.ts", officers);
       
-      await logEvent(job.id as string, 'info', 'Fetched officers', { count: (officers.items || []).length });
+      await logEvent(job.id as string, 'info', 'Fetched officers', {
+        count: (officers.items || []).length,
+        officers: (Array.isArray(officers.items) ? officers.items : []).map((o: any) => ({
+          name: o?.name || '',
+          role: o?.officer_role || '',
+          dob: o?.date_of_birth || null,
+          links: o?.links || null
+        }))
+      });
 
     // Helper to fetch appointment list for an officer (with simple pagination)
     // Optionally limit the total number of items fetched to reduce load when used for filtering.
@@ -494,6 +502,11 @@ export default new Worker("ch-appointments", async job => {
       pgPeopleWritten = peopleRecords.length;
       pgAppointmentsWritten = totalAppts;
       await logEvent(job.id as string, 'info', 'Persisted CH results to Postgres', { people: peopleRecords.length, appointments: totalAppts });
+      try {
+        // Expanded details for development visibility
+        const enrichedDetail = peopleRecords.map(r => r._enriched);
+        await logEvent(job.id as string, 'debug', 'CH results detail', { people: enrichedDetail.length, enriched: enrichedDetail });
+      } catch {}
     } catch (e) {
       await logEvent(job.id as string, 'error', 'Failed to persist CH results to Postgres', { error: String(e) });
     }
@@ -530,10 +543,10 @@ export default new Worker("ch-appointments", async job => {
     // Enqueue discovery jobs: ACTIVE immediately at higher priority, others later with delay
     let enqActive = 0, enqLater = 0;
     for (const c of activeCompanies) {
-      const jobId = `co:${c.company_number}`;
+      const jobId = `co:${job.id}:${c.company_number}`;
       await companyQ.add(
         "discover",
-        { companyNumber: c.company_number, companyName: c.company_name, address: c.registered_address, postcode: c.registered_postcode },
+        { companyNumber: c.company_number, companyName: c.company_name, address: c.registered_address, postcode: c.registered_postcode, rootJobId: job.id },
         { jobId, priority: 1, attempts: 5, backoff: { type: "exponential", delay: 1500 } }
       );
       enqActive++;
@@ -541,8 +554,18 @@ export default new Worker("ch-appointments", async job => {
     // Skip discovery for non-active (e.g., dissolved) companies
     await logEvent(job.id as string, 'info', 'Enqueued company-discovery follow-ups (active only)', { active: enqActive, skipped_non_active: laterCompanies.length });
 
-    await completeJob(job.id as string, { companyNumber, matches: enriched.length, enriched, pg: { people: pgPeopleWritten, appointments: pgAppointmentsWritten }, enqueued: { active: enqActive, later: enqLater } });
-    logger.info({ companyNumber, matches: enriched.length, pg: { people: pgPeopleWritten, appointments: pgAppointmentsWritten }, enqueued: { active: enqActive, skipped_non_active: laterCompanies.length } }, "CH processed");
+    await completeJob(job.id as string, {
+      companyNumber,
+      matches: enriched.length,
+      enriched,
+      pg: { people: pgPeopleWritten, appointments: pgAppointmentsWritten },
+      enqueued: {
+        active: enqActive,
+        later: enqLater,
+        companies: activeCompanies.map(c => c.company_number)
+      }
+    });
+    logger.info({ companyNumber, matches: enriched.length, pg: { people: pgPeopleWritten, appointments: pgAppointmentsWritten }, enqueued: { active: enqActive, skipped_non_active: laterCompanies.length, companies: activeCompanies.map(c => c.company_number) } }, "CH processed");
   } catch (err) {
     await failJob(job.id as string, err);
     logger.error({ companyNumber, err: String(err) }, 'CH worker failed');

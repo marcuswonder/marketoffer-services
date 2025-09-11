@@ -2,6 +2,7 @@ import "dotenv/config";
 import { Worker } from "bullmq";
 import { connection } from "../queues/index.js";
 import { personQ } from "../queues/index.js";
+import { siteFetchQ } from "../queues/index.js";
 import { cleanCompanyName, baseHost } from "../lib/normalize.js";
 import { batchCreate } from "../lib/airtable.js";
 import { logger } from "../lib/logger.js";
@@ -25,16 +26,21 @@ const sicMapPath = path.join(process.cwd(), "config", "sicCodes.json");
 const sicEntries: Array<{ code: number; key_phrases?: string[]; description?: string }> = JSON.parse(fs.readFileSync(sicMapPath, 'utf-8'));
 const sicToPhrases = new Map<string, string[]>(sicEntries.map(e => [String(e.code), Array.isArray(e.key_phrases) ? e.key_phrases : []]));
 
-async function serperSearch(q: string) {
+async function serperSearch(q: string): Promise<{ status: number; headers: Record<string,string>; data: any }> {
   const res = await fetch("https://google.serper.dev/search", {
     method: "POST",
     headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ q, gl: "uk", hl: "en", autocorrect: true })
+    body: JSON.stringify({ q, gl: "uk", hl: "en", autocorrect: true, num: 10 })
   });
+  const status = res.status;
+  const headers: Record<string,string> = {};
+  try { res.headers.forEach((v,k)=>{ headers[k]=v; }); } catch {}
   if (!res.ok) throw new Error(`Serper ${res.status}`);
-  // return res.json();
-  return (await res.json()) as any;
+  const data = await res.json();
+  return { status, headers, data };
 }
+
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
 function asArray<T = any>(val: any): T[] {
   if (Array.isArray(val)) return val as T[];
@@ -44,7 +50,7 @@ function asArray<T = any>(val: any): T[] {
 
 await initDb();
 export default new Worker("company-discovery", async job => {
-  const { companyNumber, companyName, address, postcode } = job.data as any;
+  const { companyNumber, companyName, address, postcode, rootJobId } = job.data as any;
   await startJob({ jobId: job.id as string, queue: 'company-discovery', name: job.name, payload: job.data });
   try {
     const cleaned = cleanCompanyName(companyName || "");
@@ -81,15 +87,46 @@ export default new Worker("company-discovery", async job => {
       }
       return false;
     };
+    const baseSimple = `${companyName} UK`;
     for (const q of queries) {
-      const data = await serperSearch(q);
-      const organic = asArray((data as any).organic).slice(0, 10);
-      const peopleAlso = asArray((data as any).peopleAlsoSearch).slice(0, 10);
-      const knowledge = asArray((data as any).knowledgeGraph).slice(0, 10);
+      const resp = await serperSearch(q);
+      const data = resp.data as any;
+      let organic = asArray((data as any).organic).slice(0, 10);
+      let peopleAlso = asArray((data as any).peopleAlsoSearch).slice(0, 10);
+      let knowledge = asArray((data as any).knowledgeGraph).slice(0, 10);
+      const allEmpty = !(organic.length || peopleAlso.length || knowledge.length);
+      if (allEmpty) {
+        // Emit diagnostics and retry once with a simplified query
+        const topKeys = Object.keys(data || {}).slice(0, 12);
+        await logEvent(job.id as string, 'debug', 'Serper zero-results (diagnostic)', {
+          q,
+          status: resp.status,
+          headers: { 'serper-request-id': resp.headers['x-request-id'] || resp.headers['x-requestid'] || resp.headers['request-id'] || '' },
+          topLevelKeys: topKeys
+        });
+        // Retry after short backoff with simplified query
+        await sleep(1200);
+        const fallbackQ = baseSimple;
+        const retry = await serperSearch(fallbackQ);
+        const rdata = retry.data as any;
+        organic = asArray(rdata.organic).slice(0, 10);
+        peopleAlso = asArray(rdata.peopleAlsoSearch).slice(0, 10);
+        knowledge = asArray(rdata.knowledgeGraph).slice(0, 10);
+        await logEvent(job.id as string, 'debug', 'Serper retry results', {
+          q: fallbackQ,
+          counts: { organic: organic.length, peopleAlsoSearch: peopleAlso.length, knowledgeGraph: knowledge.length }
+        });
+      }
       const items = [...organic, ...peopleAlso, ...knowledge];
+      const organicUrls = organic.map((it: any) => it.link || it.url || '').filter(Boolean);
+      const peopleAlsoUrls = peopleAlso.map((it: any) => it.link || it.url || '').filter(Boolean);
+      const knowledgeUrls = knowledge.map((it: any) => it.link || it.url || '').filter(Boolean);
       await logEvent(job.id as string, 'debug', 'Serper results', {
         q,
-        counts: { organic: organic.length, peopleAlsoSearch: peopleAlso.length, knowledgeGraph: knowledge.length }
+        counts: { organic: organic.length, peopleAlsoSearch: peopleAlso.length, knowledgeGraph: knowledge.length },
+        organicUrls,
+        peopleAlsoUrls,
+        knowledgeUrls
       });
       for (const it of items) {
         const url = it.link || it.url || "";
@@ -98,7 +135,8 @@ export default new Worker("company-discovery", async job => {
         if (!h || isGeneric(h)) continue;
         hosts.add(h);
       }
-      await new Promise(r => setTimeout(r, 1000));
+      const jitter = 900 + Math.floor(Math.random() * 600);
+      await sleep(jitter);
     }
 
     // Helpers
@@ -157,7 +195,18 @@ export default new Worker("company-discovery", async job => {
           baseDomain,
           pages: pages.map(p => ({ url: p.url, title: p.title, meta: p.meta, text: p.text.slice(0, 4000), linkedin_candidates: filterLinkedIns(p.links) })).slice(0, 8)
         };
-        const prompt = `You are verifying if a website's base domain belongs to a given UK company. Consider company number, legal vs trading names, SIC activities, postcode/address, and directors. Decide with high precision if the base domain is owned by the company. Return strict JSON: { verdict: "yes"|"no"|"uncertain", url: string, confidence_rating: 0..1, confidence_rationale: string, trading_name?: string, linkedins?: string[] }.`;
+        const prompt = `You are verifying if a website's base domain belongs to a given UK company. Consider company number, legal vs trading names, SIC activities, postcode/address, and directors.
+
+Return strict JSON with both decision certainty and ownership likelihood:
+{
+  "verdict": "yes" | "no" | "unsure",
+  "decision_confidence": number,  // 0..1: confidence in the verdict
+  "company_relevance": number,    // 0..1: likelihood the base domain is owned by the company
+  "decision_rationale": string,
+  "url": string,
+  "trading_name"?: string,
+  "linkedins"?: string[]
+}`;
         const res = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
@@ -176,144 +225,148 @@ export default new Worker("company-discovery", async job => {
         const data: any = await res.json();
         const txt = data?.choices?.[0]?.message?.content || '{}';
         const obj = JSON.parse(txt);
-        const rating = typeof obj.confidence_rating === 'number' ? Math.max(0, Math.min(1, obj.confidence_rating)) : 0;
+        const decision_confidence = typeof obj.decision_confidence === 'number' ? Math.max(0, Math.min(1, obj.decision_confidence)) : 0;
+        const company_relevance = typeof obj.company_relevance === 'number' ? Math.max(0, Math.min(1, obj.company_relevance)) : 0;
         const linkedins: string[] = Array.isArray(obj.linkedins) ? filterLinkedIns(obj.linkedins) : [];
         const verdict = (obj.verdict || '').toString().toLowerCase();
         const trading = typeof obj.trading_name === 'string' ? obj.trading_name : '';
-        const rationale = typeof obj.confidence_rationale === 'string' ? obj.confidence_rationale : '';
-        return { verdict, rating, linkedins, trading_name: trading, rationale };
+        const rationale = typeof obj.decision_rationale === 'string' ? obj.decision_rationale : '';
+        return { verdict, decision_confidence, company_relevance, linkedins, trading_name: trading, rationale };
       } catch {
         return null;
       }
     };
 
-    // Evaluate candidate hosts
+    // Evaluate candidate hosts by enqueuing per-host site-fetch jobs (actual verification happens in site-fetch worker)
     const potentials = Array.from(hosts);
-    await logEvent(job.id as string, 'info', 'Filtered candidate hosts', { count: potentials.length });
+    await logEvent(job.id as string, 'info', 'Filtered candidate hosts', { count: potentials.length, hosts: potentials });
 
-    const verifiedSites: string[] = [];
-    const websiteVerifications: Array<{ url: string; confidence_rating: number; confidence_rationale: string }> = [];
-    const verifiedCompanyLIs = new Set<string>();
-    const verifiedPersonalLIs = new Set<string>();
-    let savedTradingName: string | null = null;
-
-    outer: for (const host of potentials) {
-      const base = `https://${host}`;
-      const pages: Array<{ url: string; title: string; meta: string; text: string; links: string[] }> = [];
-      for (const ending of COMMON_ENDINGS) {
-        const url = base + ending;
-        const r = await fetchStatic(url);
-        if (!r.ok) continue;
-        // ScrapingBee fetch for richer content
-        const bee = await fetchBeeHtml(url);
-        const html = bee.status >= 200 && bee.status < 400 && bee.html.length > 200 ? bee.html : r.html;
-        const sig = parseSignals(html);
-        pages.push({ url, title: sig.title, meta: sig.metaDesc, text: sig.text, links: sig.links });
-        // Collect LinkedIns from page
-        for (const li of filterLinkedIns(sig.links)) {
-          if (isCompanyLI(li)) verifiedCompanyLIs.add(li);
-          if (isPersonalLI(li)) verifiedPersonalLIs.add(li);
-        }
-        // Evaluate via LLM once we have at least one solid page
-        if (pages.length >= 1) {
-          const decision = await llmJudge(host, pages);
-          if (decision) {
-            // Early stop conditions
-            if (decision.verdict === 'yes' && decision.rating >= 0.85) {
-              verifiedSites.push(host);
-              websiteVerifications.push({ url: host, confidence_rating: decision.rating, confidence_rationale: decision.rationale });
-              decision.linkedins.forEach(u => { if (isCompanyLI(u)) verifiedCompanyLIs.add(u); if (isPersonalLI(u)) verifiedPersonalLIs.add(u); });
-              if (decision.trading_name) savedTradingName = decision.trading_name;
-              await logEvent(job.id as string, 'info', 'LLM accepted domain (certain)', { host, rating: decision.rating });
-              break outer;
-            }
-            if (decision.verdict === 'no' && decision.rating <= 0.15) {
-              await logEvent(job.id as string, 'info', 'LLM rejected domain (certain)', { host, rating: decision.rating });
-              break; // stop checking other endings for this host
-            }
-            if (decision.verdict === 'yes' && decision.rating >= 0.6) {
-              verifiedSites.push(host);
-              websiteVerifications.push({ url: host, confidence_rating: decision.rating, confidence_rationale: decision.rationale });
-              decision.linkedins.forEach(u => { if (isCompanyLI(u)) verifiedCompanyLIs.add(u); if (isPersonalLI(u)) verifiedPersonalLIs.add(u); });
-              if (decision.trading_name) savedTradingName = decision.trading_name;
-              await logEvent(job.id as string, 'info', 'LLM accepted domain', { host, rating: decision.rating });
-              // Keep looking at next host but we could also early exit all if you want only one
-              break; // stop more endings for this host
-            }
-            // accumulate candidates and continue with more endings for better evidence
-          }
-        }
-        await new Promise(r => setTimeout(r, 250));
-      }
-    }
-
-    // Persist results into ch_appointments
-    if (verifiedSites.length || verifiedCompanyLIs.size || verifiedPersonalLIs.size || savedTradingName || websiteVerifications.length) {
+    let enqueued = 0;
+    for (const host of potentials) {
+      const jobId = `site:${rootJobId || job.id}:${host}`;
+      const payload = { host, companyNumber, companyName, address, postcode, rootJobId };
+      // Mark as pending in job_progress so the workflow finalizer can wait on both pending and running
       try {
-        const addSites = JSON.stringify(verifiedSites);
-        const addCompanyLIs = JSON.stringify(Array.from(verifiedCompanyLIs));
-        const addPersonalLIs = JSON.stringify(Array.from(verifiedPersonalLIs));
-        const addVerif = JSON.stringify(websiteVerifications);
         await query(
-          `UPDATE ch_appointments SET
-             verified_company_website = (
-               SELECT CASE WHEN jsonb_typeof(COALESCE(verified_company_website,'[]'::jsonb))='array'
-                           THEN (
-                  SELECT jsonb_agg(DISTINCT j.value) FROM jsonb_array_elements(COALESCE(verified_company_website,'[]'::jsonb) || $1::jsonb) AS j(value)
-                           ) ELSE $1::jsonb END),
-             company_website_verification = (
-               SELECT CASE WHEN jsonb_typeof(COALESCE(company_website_verification,'[]'::jsonb))='array'
-                           THEN (
-                 SELECT jsonb_agg(DISTINCT j.value) FROM jsonb_array_elements(COALESCE(company_website_verification,'[]'::jsonb) || $3::jsonb) AS j(value)
-                           ) ELSE $3::jsonb END),
-             verified_company_linkedIns = (
-               SELECT CASE WHEN jsonb_typeof(COALESCE(verified_company_linkedIns,'[]'::jsonb))='array'
-                           THEN (
-                  SELECT jsonb_agg(DISTINCT j.value) FROM jsonb_array_elements(COALESCE(verified_company_linkedIns,'[]'::jsonb) || $2::jsonb) AS j(value)
-                            ) ELSE $2::jsonb END),
-             verified_director_linkedIns = (
-               SELECT CASE WHEN jsonb_typeof(COALESCE(verified_director_linkedIns,'[]'::jsonb))='array'
-                           THEN (
-                 SELECT jsonb_agg(DISTINCT j.value) FROM jsonb_array_elements(COALESCE(verified_director_linkedIns,'[]'::jsonb) || $5::jsonb) AS j(value)
-                           ) ELSE $5::jsonb END),
-             trading_name = COALESCE(trading_name, $4),
-             updated_at = now()
-           WHERE company_number = $6`,
-          [addSites, addCompanyLIs, addVerif, savedTradingName || null, addPersonalLIs, companyNumber]
+          `INSERT INTO job_progress(job_id, queue, name, status, data)
+           VALUES ($1,'site-fetch','fetch','pending',$2)
+           ON CONFLICT (job_id)
+           DO UPDATE SET status='pending', data=$2, updated_at=now()`,
+          [jobId, JSON.stringify(payload)]
         );
-        await logEvent(job.id as string, 'info', 'Persisted discovery results', { sites: verifiedSites.length, verifications: websiteVerifications.length, company_linkedins: verifiedCompanyLIs.size, personal_linkedins: verifiedPersonalLIs.size, trading_name: savedTradingName || null });
+      } catch {}
+      await siteFetchQ.add('fetch', payload, { jobId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
+      enqueued++;
+    }
+    await logEvent(job.id as string, 'info', 'Enqueued site-fetch jobs', { enqueued, hosts: potentials });
+
+    // If this workflow uses a rootJobId, and if all discovery work is finished (no running company-discovery or site-fetch),
+    // kick off person-linkedin here as a safety net (e.g., when no sites were found for any company).
+    if (rootJobId) {
+      try {
+        // Load expected companies for this workflow from the ch-appointments root progress record
+        const { rows: progRows } = await query<{ data: any }>(
+          `SELECT data FROM job_progress WHERE job_id = $1`,
+          [rootJobId]
+        );
+        const rootData = progRows?.[0]?.data || null;
+        const expectedCompanies: string[] = Array.isArray(rootData?.enqueued?.companies) ? rootData.enqueued.companies : [];
+
+        // Count any running jobs under the root
+        const { rows: runningAll } = await query<{ c: string }>(
+          `SELECT COUNT(*)::int AS c
+             FROM job_progress
+            WHERE status IN ('pending','running')
+              AND (queue = 'company-discovery' OR queue = 'site-fetch')
+              AND data->>'rootJobId' = $1`,
+          [rootJobId]
+        );
+        const runningCount = Number(runningAll?.[0]?.c || 0);
+
+        // Completed company-discovery jobs count vs expected
+        let completedCompanies = 0;
+        if (expectedCompanies.length) {
+          const { rows: compRows } = await query<{ c: string }>(
+            `SELECT COUNT(DISTINCT data->>'companyNumber')::int AS c
+               FROM job_progress
+              WHERE queue = 'company-discovery'
+                AND status = 'completed'
+                AND data->>'rootJobId' = $1
+                AND (data->>'companyNumber') = ANY($2::text[])`,
+            [rootJobId, expectedCompanies]
+          );
+          completedCompanies = Number(compRows?.[0]?.c || 0);
+        }
+
+        if (runningCount === 0 && (!expectedCompanies.length || completedCompanies === expectedCompanies.length)) {
+          // Enqueue person-linkedin for each person in this workflow with aggregated context across their appointments
+          const { rows: people } = await query<{ id: number; first_name: string | null; middle_names: string | null; last_name: string | null; dob_string: string | null }>(
+            `SELECT DISTINCT p.id, p.first_name, p.middle_names, p.last_name, p.dob_string
+               FROM ch_people p
+              WHERE p.job_id = $1`,
+            [rootJobId]
+          );
+          let enq = 0;
+          for (const p of people) {
+            const fullName = [p.first_name, p.middle_names, p.last_name].filter(Boolean).join(' ');
+            if (!fullName.trim()) continue;
+            const aggSql = `
+              WITH w AS (
+                SELECT j.value AS v
+                  FROM ch_appointments a,
+                       LATERAL jsonb_array_elements(COALESCE(a.verified_company_website, '[]'::jsonb)) AS j(value)
+                 WHERE a.person_id = $1
+              ),
+              lc AS (
+                SELECT j.value AS v
+                  FROM ch_appointments a,
+                       LATERAL jsonb_array_elements(COALESCE(a.verified_company_linkedIns, '[]'::jsonb)) AS j(value)
+                 WHERE a.person_id = $1
+              ),
+              lp AS (
+                SELECT j.value AS v
+                  FROM ch_appointments a,
+                       LATERAL jsonb_array_elements(COALESCE(a.verified_director_linkedIns, '[]'::jsonb)) AS j(value)
+                 WHERE a.person_id = $1
+              )
+              SELECT
+                COALESCE((SELECT jsonb_agg(DISTINCT v) FROM w), '[]'::jsonb) AS websites,
+                COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lc), '[]'::jsonb) AS company_linkedins,
+                COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lp), '[]'::jsonb) AS personal_linkedins`;
+            const { rows: aggRows } = await query<any>(aggSql, [Number((p as any).id)]);
+            const aggWebsites: string[] = Array.isArray(aggRows?.[0]?.websites) ? aggRows[0].websites : [];
+            const aggCompanyLIs: string[] = Array.isArray(aggRows?.[0]?.company_linkedins) ? aggRows[0].company_linkedins : [];
+            const aggPersonalLIs: string[] = Array.isArray(aggRows?.[0]?.personal_linkedins) ? aggRows[0].personal_linkedins : [];
+
+            const { rows: cnRows } = await query<{ company_name: string }>(
+              `SELECT company_name
+                 FROM ch_appointments a
+                WHERE a.person_id = $1 AND COALESCE(company_name,'') <> ''
+                ORDER BY updated_at DESC
+                LIMIT 1`,
+              [Number((p as any).id)]
+            );
+            const companyNameForContext = (cnRows?.[0]?.company_name || '').toString();
+
+            const pjId = `person:${(p as any).id}:${rootJobId}`;
+            await personQ.add('discover', {
+              person: { firstName: p.first_name || '', middleNames: p.middle_names || '', lastName: p.last_name || '', dob: p.dob_string || '' },
+              context: { companyName: companyNameForContext, websites: aggWebsites, companyLinkedIns: aggCompanyLIs, personalLinkedIns: aggPersonalLIs },
+              rootJobId
+            }, { jobId: pjId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
+            enq++;
+          }
+          await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after ALL discovery complete (no site-fetch jobs)', { rootJobId, people: people.length, enqueued: enq });
+        }
       } catch (e) {
-        await logEvent(job.id as string, 'error', 'Failed to persist discovery results', { error: String(e) });
+        await logEvent(job.id as string, 'error', 'Finalization check failed in company-discovery', { error: String(e), rootJobId });
       }
     }
 
-    // Enqueue person-linkedin with context when we have results
-    try {
-      const { rows: people } = await query<{ id: number; first_name: string | null; middle_names: string | null; last_name: string | null; dob_string: string | null }>(
-        `SELECT DISTINCT p.id, p.first_name, p.middle_names, p.last_name, p.dob_string
-           FROM ch_people p JOIN ch_appointments a ON a.person_id = p.id
-          WHERE a.company_number = $1`,
-        [companyNumber]
-      );
-      const companyNameCtx = (companyName || '').toString();
-      let enq = 0;
-      for (const p of people) {
-        const fullName = [p.first_name, p.middle_names, p.last_name].filter(Boolean).join(' ');
-        if (!fullName.trim()) continue;
-        const jobId = `person:${p.id}:${companyNumber}`;
-        await personQ.add('discover', {
-          person: { firstName: p.first_name || '', middleNames: p.middle_names || '', lastName: p.last_name || '', dob: p.dob_string || '' },
-          context: { companyNumber, companyName: companyNameCtx, websites: verifiedSites, companyLinkedIns: Array.from(verifiedCompanyLIs), personalLinkedIns: Array.from(verifiedPersonalLIs) }
-        }, { jobId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
-        enq++;
-      }
-      await logEvent(job.id as string, 'info', 'Enqueued person-linkedin after discovery', { enqueued: enq });
-    } catch (e) {
-      await logEvent(job.id as string, 'error', 'Failed to enqueue person-linkedin after discovery', { error: String(e) });
-    }
-
-    await completeJob(job.id as string, { companyNumber, companyName, candidates: potentials.length, verifiedSites, verifiedCompanyLinkedIns: Array.from(verifiedCompanyLIs), verifiedPersonalLinkedIns: Array.from(verifiedPersonalLIs), trading_name: savedTradingName || null });
-    logger.info({ companyNumber, candidates: potentials.length, verifiedSites: verifiedSites.length }, 'Company discovery done');
+    // site-fetch worker will persist results and enqueue person-linkedin after aggregation
+    await completeJob(job.id as string, { companyNumber, companyName, candidates: potentials.length, enqueuedSiteFetch: enqueued, rootJobId });
+    logger.info({ companyNumber, candidates: potentials.length, enqueuedSiteFetch: enqueued }, 'Company discovery dispatched to site-fetch');
+    return;
   } catch (err) {
     await failJob(job.id as string, err);
     logger.error({ companyNumber, err: String(err) }, "Company discovery failed");
