@@ -3759,5 +3759,997 @@
             "restaurant and bar",
             "licensed restaurant"
         ]
+    },
+    {
+        "code": 74100,
+        "description": "specialised design activities",
+        "key_phrases": [
+            "product design",
+            "graphic design"
+        ]
+    },
+    {
+        "code": 74201,
+        "description": "Portrait photographic activities",
+        "key_phrases": [
+            "portrait photography"
+        ]
+    },
+    {
+        "code": 74202,
+        "description": "Other specialist photography",
+        "key_phrases": [
+            "commercial photography"
+        ]
+    },
+    {
+        "code": 74203,
+        "description": "Film processing",
+        "key_phrases": [
+            "film developing",
+            "photo lab"
+        ]
+    },
+    {
+        "code": 74209,
+        "description": "Photographic activities not elsewhere classified",
+        "key_phrases": [
+            "photography studio",
+            "photo booth hire"
+        ]
+    },
+    {
+        "code": 74300,
+        "description": "Translation and interpretation activities",
+        "key_phrases": [
+            "translation services",
+            "interpretation services"
+        ]
+    },
+    {
+        "code": 74901,
+        "description": "Environmental consulting activities",
+        "key_phrases": [
+            "environmental consultancy"
+        ]
+    },
+    {
+        "code": 74902,
+        "description": "Quantity surveying activities",
+        "key_phrases": [
+            "quantity surveying",
+            "cost consultancy"
+        ]
+    },
+    {
+        "code": 74909,
+        "description": "Other professional, scientific and technical activities n.e.c.",
+        "key_phrases": [
+            "specialist consultancy"
+        ]
+    },
+    {
+        "code": 74990,
+        "description": "Non-trading company",
+        "key_phrases": [
+            "dormant company"
+        ]
+    },
+    {
+        "code": 75000,
+        "description": "Veterinary activities",
+        "key_phrases": [
+            "veterinary clinic"
+        ]
+    },
+    {
+        "code": 77110,
+        "description": "Renting and leasing of cars and light motor vehicles",
+        "key_phrases": [
+            "car hire",
+            "car leasing"
+        ]
+    },
+    {
+        "code": 77120,
+        "description": "Renting and leasing of trucks and other heavy vehicles",
+        "key_phrases": [
+            "lorry hire",
+            "heavy vehicle hire"
+        ]
+    },
+    {
+        "code": 77210,
+        "description": "Renting and leasing of recreational and sports goods",
+        "key_phrases": [
+            "sports equipment hire",
+            "outdoor activity hire"
+        ]
+    },
+    {
+        "code": 77220,
+        "description": "Renting of video tapes and disks",
+        "key_phrases": [
+            "dvd rental",
+            "videotape rental"
+        ]
+    },
+    {
+        "code": 77291,
+        "description": "Renting and leasing of media entertainment equipment",
+        "key_phrases": [
+            "av equipment rental",
+            "studio equipment hire"
+        ]
+    },
+    {
+        "code": 77299,
+        "description": "Renting and leasing of other personal and household goods",
+        "key_phrases": [
+            "furniture hire",
+            "domestic appliance hire"
+        ]
+    },
+    {
+        "code": 77310,
+        "description": "Renting and leasing of agricultural machinery and equipment",
+        "key_phrases": [
+            "farm machinery hire",
+            "agricultural equipment rental"
+        ]
+    },
+    {
+        "code": 77320,
+        "description": "Renting and leasing of construction and civil engineering machinery and equipment",
+        "key_phrases": [
+            "plant hire"
+        ]
+    },
+    {
+        "code": 77330,
+        "description": "Renting and leasing of office machinery and equipment (including computers)",
+        "key_phrases": [
+            "office equipment rental",
+            "computer hire"
+        ]
+    },
+    {
+        "code": 77341,
+        "description": "Renting and leasing of passenger water transport equipment",
+        "key_phrases": [
+            "passenger boat hire",
+            "water taxi hire"
+        ]
+    },
+    {
+        "code": 77342,
+        "description": "Renting and leasing of freight water transport equipment",
+        "key_phrases": [
+            "container leasing",
+            "barge hire"
+        ]
+    },
+    {
+        "code": 77351,
+        "description": "Renting and leasing of air passenger transport equipment",
+        "key_phrases": [
+            "aircraft leasing"
+        ]
+    },
+    {
+        "code": 77352,
+        "description": "Renting and leasing of freight air transport equipment",
+        "key_phrases": [
+            "air cargo container leasing",
+            "air freight equipment rental"
+        ]
+    },
+    {
+        "code": 77390,
+        "description": "Renting and leasing of other machinery, equipment and tangible goods n.e.c.",
+        "key_phrases": [
+            "equipment hire",
+            "plant hire"
+        ]
+    },
+    {
+        "code": 77400,
+        "description": "Leasing of intellectual property and similar products, except copyright works",
+        "key_phrases": [
+            "intellectual property licensing"
+        ]
+    },
+    {
+        "code": 78101,
+        "description": "Motion picture, television and other theatrical casting activities",
+        "key_phrases": [
+            "film and tv casting",
+            "theatre casting"
+        ]
+    },
+    {
+        "code": 78109,
+        "description": "Other activities of employment placement agencies",
+        "key_phrases": [
+            "recruitment agency"
+        ]
+    },
+    {
+        "code": 78200,
+        "description": "Temporary employment agency activities",
+        "key_phrases": [
+            "temporary staffing"
+        ]
+    },
+    {
+        "code": 78300,
+        "description": "Human resources provision and management of human resources functions",
+        "key_phrases": [
+            "hr outsourcing"
+        ]
+    },
+    {
+        "code": 79110,
+        "description": "Travel agency activities",
+        "key_phrases": [
+            "travel agency",
+            "package holidays"
+        ]
+    },
+    {
+        "code": 79120,
+        "description": "Tour operator activities",
+        "key_phrases": [
+            "tour operator",
+            "package holidays"
+        ]
+    },
+    {
+        "code": 79901,
+        "description": "Activities of tourist guides",
+        "key_phrases": [
+            "tour guides"
+        ]
+    },
+    {
+        "code": 79909,
+        "description": "Other reservation service activities n.e.c.",
+        "key_phrases": [
+            "online booking platform",
+            "appointment booking"
+        ]
+    },
+    {
+        "code": 80100,
+        "description": "Private security activities",
+        "key_phrases": [
+            "security guard services",
+            "cctv monitoring"
+        ]
+    },
+    {
+        "code": 80200,
+        "description": "Security systems service activities",
+        "key_phrases": [
+            "cctv installation",
+            "intruder alarm maintenance"
+        ]
+    },
+    {
+        "code": 80300,
+        "description": "Investigation activities",
+        "key_phrases": [
+            "private investigation"
+        ]
+    },
+    {
+        "code": 81100,
+        "description": "Combined facilities support activities",
+        "key_phrases": [
+            "facilities management"
+        ]
+    },
+    {
+        "code": 81210,
+        "description": "General cleaning of buildings",
+        "key_phrases": [
+            "commercial cleaning",
+            "residential cleaning"
+        ]
+    },
+    {
+        "code": 81221,
+        "description": "Window cleaning services",
+        "key_phrases": [
+            "window cleaning"
+        ]
+    },
+    {
+        "code": 81222,
+        "description": "Specialised cleaning services",
+        "key_phrases": [
+            "industrial cleaning",
+            "deep cleaning"
+        ]
+    },
+    {
+        "code": 81223,
+        "description": "Furnace and chimney cleaning services",
+        "key_phrases": [
+            "chimney sweeping",
+            "furnace cleaning"
+        ]
+    },
+    {
+        "code": 81229,
+        "description": "Other building and industrial cleaning activities",
+        "key_phrases": [
+            "industrial cleaning",
+            "commercial deep cleaning"
+        ]
+    },
+    {
+        "code": 81291,
+        "description": "Disinfecting and exterminating services",
+        "key_phrases": [
+            "pest control",
+            "professional disinfection"
+        ]
+    },
+    {
+        "code": 81299,
+        "description": "Other cleaning services",
+        "key_phrases": [
+            "commercial cleaning",
+            "carpet cleaning"
+        ]
+    },
+    {
+        "code": 81300,
+        "description": "Landscape service activities",
+        "key_phrases": [
+            "landscaping contractors",
+            "grounds maintenance"
+        ]
+    },
+    {
+        "code": 82110,
+        "description": "Combined office administrative service activities",
+        "key_phrases": [
+            "office administration",
+            "administration outsourcing"
+        ]
+    },
+    {
+        "code": 82190,
+        "description": "Photocopying, document preparation and other specialised office support activities",
+        "key_phrases": [
+            "photocopying services",
+            "document preparation"
+        ]
+    },
+    {
+        "code": 82200,
+        "description": "Activities of call centres",
+        "key_phrases": [
+            "call centre",
+            "contact centre"
+        ]
+    },
+    {
+        "code": 82301,
+        "description": "Activities of exhibition and fair organisers",
+        "key_phrases": [
+            "exhibition organiser"
+        ]
+    },
+    {
+        "code": 82302,
+        "description": "Activities of conference organisers",
+        "key_phrases": [
+            "conference organisers"
+        ]
+    },
+    {
+        "code": 82911,
+        "description": "Activities of collection agencies",
+        "key_phrases": [
+            "debt collection agency",
+            "receivables recovery"
+        ]
+    },
+    {
+        "code": 82912,
+        "description": "Activities of credit bureaus",
+        "key_phrases": [
+            "credit reference agency"
+        ]
+    },
+    {
+        "code": 82920,
+        "description": "Packaging activities",
+        "key_phrases": [
+            "contract packaging"
+        ]
+    },
+    {
+        "code": 82990,
+        "description": "Other business support service activities n.e.c.",
+        "key_phrases": [
+            "outsourced administration",
+            "back-office support"
+        ]
+    },
+    {
+        "code": 84110,
+        "description": "General public administration activities",
+        "key_phrases": [
+            "public administration"
+        ]
+    },
+    {
+        "code": 84120,
+        "description": "Regulation of health care, education, cultural and other social services, not incl. social security",
+        "key_phrases": [
+            "social services regulator"
+        ]
+    },
+    {
+        "code": 84130,
+        "description": "Regulation of and contribution to more efficient operation of businesses",
+        "key_phrases": [
+            "business regulation"
+        ]
+    },
+    {
+        "code": 84210,
+        "description": "Foreign affairs",
+        "key_phrases": [
+            "foreign affairs administration"
+        ]
+    },
+    {
+        "code": 84220,
+        "description": "Defence activities",
+        "key_phrases": [
+            "defence administration"
+        ]
+    },
+    {
+        "code": 84230,
+        "description": "Justice and judicial activities",
+        "key_phrases": [
+            "judicial services"
+        ]
+    },
+    {
+        "code": 84240,
+        "description": "Public order and safety activities",
+        "key_phrases": [
+            "public order and safety"
+        ]
+    },
+    {
+        "code": 84250,
+        "description": "Fire service activities",
+        "key_phrases": [
+            "fire and rescue service"
+        ]
+    },
+    {
+        "code": 84300,
+        "description": "Compulsory social security activities",
+        "key_phrases": [
+            "social security administration"
+        ]
+    },
+    {
+        "code": 85100,
+        "description": "Pre-primary education",
+        "key_phrases": [
+            "nursery school"
+        ]
+    },
+    {
+        "code": 85200,
+        "description": "Primary education",
+        "key_phrases": [
+            "primary school"
+        ]
+    },
+    {
+        "code": 85310,
+        "description": "General secondary education",
+        "key_phrases": [
+            "secondary school"
+        ]
+    },
+    {
+        "code": 85320,
+        "description": "Technical and vocational secondary education",
+        "key_phrases": [
+            "vocational secondary school"
+        ]
+    },
+    {
+        "code": 85410,
+        "description": "Post-secondary non-tertiary education",
+        "key_phrases": [
+            "further education college",
+            "vocational training"
+        ]
+    },
+    {
+        "code": 85421,
+        "description": "First-degree level higher education",
+        "key_phrases": [
+            "undergraduate degree courses"
+        ]
+    },
+    {
+        "code": 85422,
+        "description": "Post-graduate level higher education",
+        "key_phrases": [
+            "postgraduate courses",
+            "doctoral training"
+        ]
+    },
+    {
+        "code": 85510,
+        "description": "Sports and recreation education",
+        "key_phrases": [
+            "sports coaching",
+            "recreation classes"
+        ]
+    },
+    {
+        "code": 85520,
+        "description": "Cultural education",
+        "key_phrases": [
+            "arts education",
+            "heritage education"
+        ]
+    },
+    {
+        "code": 85530,
+        "description": "Driving school activities",
+        "key_phrases": [
+            "driving lessons",
+            "driving instructors"
+        ]
+    },
+    {
+        "code": 85590,
+        "description": "Other education n.e.c.",
+        "key_phrases": [
+            "specialist training courses",
+            "educational workshops"
+        ]
+    },
+    {
+        "code": 85600,
+        "description": "Educational support services",
+        "key_phrases": [
+            "education consultancy",
+            "private tutoring"
+        ]
+    },
+    {
+        "code": 86101,
+        "description": "Hospital activities",
+        "key_phrases": [
+            "general hospital"
+        ]
+    },
+    {
+        "code": 86102,
+        "description": "Medical nursing home activities",
+        "key_phrases": [
+            "nursing home care"
+        ]
+    },
+    {
+        "code": 86210,
+        "description": "General medical practice activities",
+        "key_phrases": [
+            "gp surgery"
+        ]
+    },
+    {
+        "code": 86220,
+        "description": "Specialists medical practice activities",
+        "key_phrases": [
+            "specialist medical clinic"
+        ]
+    },
+    {
+        "code": 86230,
+        "description": "Dental practice activities",
+        "key_phrases": [
+            "dental clinic"
+        ]
+    },
+    {
+        "code": 86900,
+        "description": "Other human health activities",
+        "key_phrases": [
+            "private medical clinic",
+            "occupational health clinic"
+        ]
+    },
+    {
+        "code": 87100,
+        "description": "Residential nursing care facilities",
+        "key_phrases": [
+            "nursing home"
+        ]
+    },
+    {
+        "code": 87200,
+        "description": "Residential care activities for learning difficulties, mental health and substance abuse",
+        "key_phrases": [
+            "residential learning disability care",
+            "mental health residential care"
+        ]
+    },
+    {
+        "code": 87300,
+        "description": "Residential care activities for the elderly and disabled",
+        "key_phrases": [
+            "residential care home",
+            "residential disability care"
+        ]
+    },
+    {
+        "code": 87900,
+        "description": "Other residential care activities n.e.c.",
+        "key_phrases": [
+            "residential rehabilitation centre",
+            "supported living accommodation"
+        ]
+    },
+    {
+        "code": 88100,
+        "description": "Social work activities without accommodation for the elderly and disabled",
+        "key_phrases": [
+            "home care"
+        ]
+    },
+    {
+        "code": 88910,
+        "description": "Child day-care activities",
+        "key_phrases": [
+            "day nursery",
+            "childcare centre"
+        ]
+    },
+    {
+        "code": 88990,
+        "description": "Other social work activities without accommodation n.e.c.",
+        "key_phrases": [
+            "social care services"
+        ]
+    },
+    {
+        "code": 90010,
+        "description": "Performing arts",
+        "key_phrases": [
+            "theatre productions",
+            "dance performances"
+        ]
+    },
+    {
+        "code": 90020,
+        "description": "Support activities to performing arts",
+        "key_phrases": [
+            "theatre production services",
+            "stage technical services"
+        ]
+    },
+    {
+        "code": 90030,
+        "description": "Artistic creation",
+        "key_phrases": [
+            "art studio"
+        ]
+    },
+    {
+        "code": 90040,
+        "description": "Operation of arts facilities",
+        "key_phrases": [
+            "arts venue management"
+        ]
+    },
+    {
+        "code": 91011,
+        "description": "Library activities",
+        "key_phrases": [
+            "public library",
+            "digital library"
+        ]
+    },
+    {
+        "code": 91012,
+        "description": "Archives activities",
+        "key_phrases": [
+            "archive services"
+        ]
+    },
+    {
+        "code": 91020,
+        "description": "Museums activities",
+        "key_phrases": [
+            "museum operator",
+            "museum exhibitions"
+        ]
+    },
+    {
+        "code": 91030,
+        "description": "Operation of historical sites and buildings and similar visitor attractions",
+        "key_phrases": [
+            "heritage attraction",
+            "historic house museum"
+        ]
+    },
+    {
+        "code": 91040,
+        "description": "Botanical and zoological gardens and nature reserves activities",
+        "key_phrases": [
+            "botanical garden",
+            "zoo and wildlife park"
+        ]
+    },
+    {
+        "code": 92000,
+        "description": "Gambling and betting activities",
+        "key_phrases": [
+            "sports betting",
+            "online casino"
+        ]
+    },
+    {
+        "code": 93110,
+        "description": "Operation of sports facilities",
+        "key_phrases": [
+            "sports centre management",
+            "sports venue hire"
+        ]
+    },
+    {
+        "code": 93120,
+        "description": "Activities of sport clubs",
+        "key_phrases": [
+            "sports club"
+        ]
+    },
+    {
+        "code": 93130,
+        "description": "Fitness facilities",
+        "key_phrases": [
+            "fitness centre"
+        ]
+    },
+    {
+        "code": 93191,
+        "description": "Activities of racehorse owners",
+        "key_phrases": [
+            "racehorse ownership"
+        ]
+    },
+    {
+        "code": 93199,
+        "description": "Other sports activities",
+        "key_phrases": [
+            "sports coaching",
+            "adventure activities"
+        ]
+    },
+    {
+        "code": 93210,
+        "description": "Activities of amusement parks and theme parks",
+        "key_phrases": [
+            "amusement park",
+            "theme park"
+        ]
+    },
+    {
+        "code": 93290,
+        "description": "Other amusement and recreation activities n.e.c.",
+        "key_phrases": [
+            "family entertainment centre",
+            "escape rooms"
+        ]
+    },
+    {
+        "code": 94110,
+        "description": "Activities of business and employers membership organisations",
+        "key_phrases": [
+            "trade association",
+            "employers organisation"
+        ]
+    },
+    {
+        "code": 94120,
+        "description": "Activities of professional membership organisations",
+        "key_phrases": [
+            "professional association"
+        ]
+    },
+    {
+        "code": 94200,
+        "description": "Activities of trade unions",
+        "key_phrases": [
+            "trade union"
+        ]
+    },
+    {
+        "code": 94910,
+        "description": "Activities of religious organisations",
+        "key_phrases": [
+            "place of worship",
+            "religious charity"
+        ]
+    },
+    {
+        "code": 94920,
+        "description": "Activities of political organisations",
+        "key_phrases": [
+            "political party",
+            "campaign group"
+        ]
+    },
+    {
+        "code": 94990,
+        "description": "Activities of other membership organisations n.e.c.",
+        "key_phrases": [
+            "membership organisation",
+            "trade association"
+        ]
+    },
+    {
+        "code": 95110,
+        "description": "Repair of computers and peripheral equipment",
+        "key_phrases": [
+            "computer repair",
+            "printer repair"
+        ]
+    },
+    {
+        "code": 95120,
+        "description": "Repair of communication equipment",
+        "key_phrases": [
+            "mobile phone repair",
+            "telecoms equipment repair"
+        ]
+    },
+    {
+        "code": 95210,
+        "description": "Repair of consumer electronics",
+        "key_phrases": [
+            "consumer electronics repair"
+        ]
+    },
+    {
+        "code": 95220,
+        "description": "Repair of household appliances and home and garden equipment",
+        "key_phrases": [
+            "home appliance repair",
+            "garden equipment repair"
+        ]
+    },
+    {
+        "code": 95230,
+        "description": "Repair of footwear and leather goods",
+        "key_phrases": [
+            "shoe repair",
+            "leather repair"
+        ]
+    },
+    {
+        "code": 95240,
+        "description": "Repair of furniture and home furnishings",
+        "key_phrases": [
+            "furniture repair",
+            "upholstery repair"
+        ]
+    },
+    {
+        "code": 95250,
+        "description": "Repair of watches, clocks and jewellery",
+        "key_phrases": [
+            "watch and clock repair",
+            "jewellery repair"
+        ]
+    },
+    {
+        "code": 95290,
+        "description": "Repair of personal and household goods n.e.c.",
+        "key_phrases": [
+            "home appliance repair",
+            "watch and jewellery repair"
+        ]
+    },
+    {
+        "code": 96010,
+        "description": "Washing and (dry-)cleaning of textile and fur products",
+        "key_phrases": [
+            "laundry service",
+            "dry cleaning"
+        ]
+    },
+    {
+        "code": 96020,
+        "description": "Hairdressing and other beauty treatment",
+        "key_phrases": [
+            "hair salon",
+            "beauty salon"
+        ]
+    },
+    {
+        "code": 96030,
+        "description": "Funeral and related activities",
+        "key_phrases": [
+            "funeral directors",
+            "cremation services"
+        ]
+    },
+    {
+        "code": 96040,
+        "description": "Physical well-being activities",
+        "key_phrases": [
+            "fitness classes",
+            "personal training"
+        ]
+    },
+    {
+        "code": 96090,
+        "description": "Other service activities n.e.c.",
+        "key_phrases": [
+            "personal services",
+            "household services"
+        ]
+    },
+    {
+        "code": 97000,
+        "description": "Activities of households as employers of domestic personnel",
+        "key_phrases": [
+            "domestic staff employer"
+        ]
+    },
+    {
+        "code": 98000,
+        "description": "Residents property management",
+        "key_phrases": [
+            "residents management company",
+            "block management"
+        ]
+    },
+    {
+        "code": 98100,
+        "description": "Undifferentiated goods-producing activities of private households for own use",
+        "key_phrases": [
+            "household production"
+        ]
+    },
+    {
+        "code": 98200,
+        "description": "Undifferentiated service-producing activities of private households for own use",
+        "key_phrases": [
+            "private household activities"
+        ]
+    },
+    {
+        "code": 99000,
+        "description": "Activities of extraterritorial organisations and bodies",
+        "key_phrases": [
+            "international organisation"
+        ]
+    },
+    {
+        "code": 99999,
+        "description": "Dormant Company",
+        "key_phrases": [
+            "dormant company"
+        ]
     }
 ]
