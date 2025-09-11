@@ -25,6 +25,7 @@ const LLM_ONLY = (process.env.LLM_ONLY_WEBSITE_VALIDATION || "").toLowerCase() =
 const ACCEPT_THRESHOLD = Number(process.env.SITEFETCH_ACCEPT_THRESHOLD || 0.75);
 const MAX_PAGES_FOR_LLM = Number(process.env.SITEFETCH_MAX_PAGES || 5);
 const SNIPPET_CHARS = Number(process.env.SITEFETCH_MAX_SNIPPET_CHARS || 800);
+const LLM_DEBUG_LOGS = (process.env.LLM_DEBUG_LOGS || "").toLowerCase() === 'true';
 
 const COMMON_PATHS = [
   "/",
@@ -259,6 +260,7 @@ async function llmEvaluateHost(params: {
   companyName: string;
   companyNumber?: string;
   postcode?: string;
+  jobId?: string;
   pages: Array<{
     url: string;
     title: string;
@@ -284,16 +286,30 @@ async function llmEvaluateHost(params: {
   };
   const prompt = `You judge if the website belongs to the given UK company. Use the structured evidence only.
 
+Strict rules:
+- Do NOT answer "yes" based only on brand/name similarity or the mere presence of a LinkedIn page.
+- Prefer hard evidence such as: exact Companies House number match; exact legal name in JSON-LD; full registered address; matching email domain on the site; or a clear on‑site statement tying the legal entity to the domain.
+- If hard evidence is absent, prefer "no" or "unsure" even if the names look similar.
+
 Return strict JSON with both decision certainty and ownership likelihood:
 {
   "verdict": "yes" | "no" | "unsure",
-  "decision_confidence": number  // 0..1: how confident you are in the verdict
-  "company_relevance": number    // 0..1: likelihood the domain is owned by the target company (1 = owned, 0 = not owned)
-  "decision_rationale": string   // concise reasoning for the verdict
-  "linkedins": string[]          // any related LinkedIn URLs found in evidence
-  "trading_name"?: string        // present if a trading name is more appropriate
+  "decision_confidence": number,  // 0..1: how confident you are in the verdict
+  "company_relevance": number,    // 0..1: likelihood the domain is owned by the company
+  "decision_rationale": string,   // concise reasoning citing strongest evidence
+  "linkedins": string[],          // any related LinkedIn URLs found in evidence
+  "trading_name"?: string         // present if a trading name is more appropriate
 }`;
   try {
+    if (LLM_DEBUG_LOGS && params.jobId) {
+      await logEvent(params.jobId, 'debug', 'LLM evaluate request', {
+        host: params.host,
+        company: { name: params.companyName, number: params.companyNumber || '', postcode: params.postcode || '' },
+        pages: params.pages.map(p => ({ url: p.url, title: p.title, jsonld_org_name: p.jsonld_org_name || '',
+                                        nums: p.company_numbers.length, postcodes: p.postcodes.length,
+                                        emails: p.emails.length, linkedins: p.linkedins.length }))
+      });
+    }
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { "Authorization": `Bearer ${OPENAI_KEY}`, "Content-Type": "application/json" },
@@ -318,6 +334,15 @@ Return strict JSON with both decision certainty and ownership likelihood:
     const verdict = (obj.verdict || '').toString().toLowerCase();
     const trading_name = typeof obj.trading_name === 'string' ? obj.trading_name : undefined;
     const rationale = typeof obj.decision_rationale === 'string' ? obj.decision_rationale : '';
+    if (LLM_DEBUG_LOGS && params.jobId) {
+      await logEvent(params.jobId, 'debug', 'LLM evaluate response', {
+        host: params.host,
+        verdict, decision_confidence, company_relevance,
+        rationale: rationale.slice(0, 400),
+        linkedins_count: linkedins.length,
+        trading_name: trading_name || ''
+      });
+    }
     return { verdict, decision_confidence, company_relevance, rationale, linkedins, trading_name };
   } catch {
     return null;
@@ -564,7 +589,7 @@ export default new Worker("site-fetch", async job => {
     if (!abortHost && (LLM_ONLY || bestScore < ACCEPT_THRESHOLD)) {
       // Trim evidence to a reasonable size
       const usedPages = pageEvidence.slice(0, MAX_PAGES_FOR_LLM);
-      const decision = await llmEvaluateHost({ host, companyName, companyNumber, postcode, pages: usedPages });
+      const decision = await llmEvaluateHost({ host, companyName, companyNumber, postcode, pages: usedPages, jobId: job.id as string });
       if (decision) {
         // Use company_relevance to score ownership likelihood. Keep rationale prefixed.
         bestScore = decision.company_relevance;
