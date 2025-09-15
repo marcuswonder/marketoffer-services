@@ -10,10 +10,6 @@ const WRITE_TO_AIRTABLE = (process.env.WRITE_TO_AIRTABLE || "").toLowerCase() ==
 const SERPER_API_KEY = process.env.SERPER_API_KEY || "";
 const LLM_DEBUG_LOGS = (process.env.LLM_DEBUG_LOGS || "").toLowerCase() === 'true';
 const PERSON_SERPER_JITTER_MS = 900;
-const PERSON_MAX_TRADING = Number(process.env.PERSON_MAX_TRADING || 5);
-const PERSON_MAX_COMPANY = Number(process.env.PERSON_MAX_COMPANY || 5);
-const PERSON_MAX_PERSONAL_CANDIDATES = Number(process.env.PERSON_MAX_PERSONAL_CANDIDATES || 10);
-const PERSON_MAX_COMPANY_CANDIDATES = Number(process.env.PERSON_MAX_COMPANY_CANDIDATES || 6);
 
 async function serperSearch(q: string) {
   const res = await fetch("https://google.serper.dev/search", {
@@ -69,7 +65,7 @@ async function scorePersonalCandidate(opts: {
     candidate: opts.candidate
   };
   const prompt = `Goal: Assess whether the LinkedIn URL belongs to the target person. Return strict JSON { relevance: 0..1, confidence: 0..1, rationale: string }.
-Rules: Do not rely on name similarity alone. Prefer multiple supporting cues such as company/trading-name match, role/title alignment, location, tenure/dates. If evidence is weak/ambiguous, lower relevance and/or confidence.`;
+  Rules: Do not rely on name similarity alone. Prefer multiple supporting cues such as company/trading-name match, role/title alignment, location, tenure/dates. If evidence is weak/ambiguous, lower relevance and/or confidence.`;
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY || ''}`, 'Content-Type': 'application/json' },
@@ -84,7 +80,10 @@ Rules: Do not rely on name similarity alone. Prefer multiple supporting cues suc
       ]
     })
   });
-  if (!res.ok) return null;
+  if (!res.ok) {
+    await logEvent(opts.jobId, 'debug', 'LLM res failed', { url: opts.candidate.url, title: opts.candidate.title, status: res.status, statusText: res.statusText });
+    return null;
+  }
   const data: any = await res.json();
   const txt = data?.choices?.[0]?.message?.content || '{}';
   try {
@@ -128,7 +127,10 @@ async function scoreCompanyCandidate(opts: {
       ]
     })
   });
-  if (!res.ok) return null;
+  if (!res.ok) { 
+    await logEvent(opts.jobId, 'debug', 'LLM res failed', { url: opts.candidate.url, title: opts.candidate.title || '', status: res.status, statusText: res.statusText });
+    return null;
+  }
   const data: any = await res.json();
   const txt = data?.choices?.[0]?.message?.content || '{}';
   try {
@@ -157,6 +159,16 @@ export default new Worker("person-linkedin", async job => {
   const { personId, person, context, rootJobId } = job.data as PersonSearchPayload;
   await startJob({ jobId: job.id as string, queue: 'person-linkedin', name: job.name, payload: job.data });
   try {
+    // High-level: record job receipt for timeline visibility
+    await logEvent(job.id as string, 'info', 'Person LI job received', {
+      hasPersonId: Boolean(personId),
+      hasPersonPayload: Boolean(person),
+      hasContext: Boolean(context),
+      rootJobId: rootJobId || null
+    });
+    if (rootJobId) {
+      try { await logEvent(rootJobId, 'info', 'Person LI: job received', { childJobId: job.id, hasPersonId: Boolean(personId) }); } catch {}
+    }
     let fullName = "";
     let dob: string | undefined;
     let first = "";
@@ -186,9 +198,9 @@ export default new Worker("person-linkedin", async job => {
     // Build query seeds
     const websites: string[] = Array.isArray(context?.websites) ? (context!.websites as string[]) : [];
     const siteHosts = Array.from(new Set(websites.map(w => (w || '').toString().replace(/^https?:\/\//i, '').replace(/\/$/, '')))).filter(Boolean);
-    const tradingNames = Array.from(new Set(siteHosts.map(h => hostLabel(h)))).filter(Boolean).slice(0, PERSON_MAX_TRADING);
+    const tradingNames = Array.from(new Set(siteHosts.map(h => hostLabel(h)))).filter(Boolean);
     const companyNameCtx: string = (context?.companyName || '').toString();
-    const companyNames = Array.from(new Set([companyNameCtx, ...tradingNames])).filter(Boolean).slice(0, PERSON_MAX_COMPANY);
+    const companyNames = Array.from(new Set([companyNameCtx, ...tradingNames])).filter(Boolean);
     const personalSeeds: string[] = Array.isArray(context?.personalLinkedIns) ? (context!.personalLinkedIns as string[]) : [];
     const companySeeds: string[] = Array.isArray(context?.companyLinkedIns) ? (context!.companyLinkedIns as string[]) : [];
 
@@ -226,16 +238,56 @@ export default new Worker("person-linkedin", async job => {
       companyNames
     });
     if (rootJobId) {
-      try { await logEvent(rootJobId, 'info', 'Person LI built queries', { fullName, personalQueries: personalQueries.slice(0, 3), companyQueries: companyQueries.slice(0, 3) }); } catch {}
+      try {
+        const personalFull = personalQueries.filter(q => fullName && q.startsWith(`${fullName} `));
+        const personalShort = shortName && shortName !== fullName ? personalQueries.filter(q => q.startsWith(`${shortName} `)) : [];
+        await logEvent(rootJobId, 'info', 'Person LI built queries', {
+          fullName,
+          shortName,
+          counts: { personal_total: personalQueries.length, full: personalFull.length, short: personalShort.length },
+          samples: { full: personalFull.slice(0, 3), short: personalShort.slice(0, 3) },
+          companyQueries: companyQueries.slice(0, 3)
+        });
+      } catch {}
     }
 
     type Hit = { url: string; title?: string; snippet?: string };
     const personalHits: Hit[] = [];
     const companyHits: Hit[] = [];
-
+    // Track first-seen Serper organic item per canonical URL for later logging
+    const serperMetaByUrl = new Map<string, any>();
+    const totalQueries = personalQueries.length + companyQueries.length;
+    if (totalQueries === 0) {
+      await logEvent(job.id as string, 'warn', 'No queries to run', { reason: 'empty_name_or_context' });
+      if (rootJobId) {
+        try { await logEvent(rootJobId, 'warn', 'Person LI: no queries to run', { childJobId: job.id }); } catch {}
+      }
+    } else {
+      await logEvent(job.id as string, 'info', 'Executing search queries', { total: totalQueries, personal: personalQueries.length, company: companyQueries.length });
+      if (rootJobId) {
+        try { await logEvent(rootJobId, 'info', 'Person LI: executing search queries', { childJobId: job.id, total: totalQueries }); } catch {}
+      }
+    }
+    let processed = 0;
+    const infoEvery = Math.max(1, Math.floor(totalQueries / 5));
     for (const q of [...personalQueries, ...companyQueries]) {
       const data = await serperSearch(q);
       const organic = Array.isArray((data as any).organic) ? (data as any).organic : [];
+      // Log Serper raw results (trimmed) so we can assess query quality
+      try {
+        const sample = organic.slice(0, 5).map((it: any) => ({
+          link: it.link,
+          title: it.title,
+          snippet: it.snippet
+        }));
+        await logEvent(job.id as string, 'info', 'Serper organic results', {
+          query: q,
+          count: organic.length,
+          sample
+        });
+      } catch {}
+      const pBefore = personalHits.length;
+      const cBefore = companyHits.length;
       for (const it of organic) {
         const link: string = it.link || '';
         const title: string = it.title || '';
@@ -243,17 +295,55 @@ export default new Worker("person-linkedin", async job => {
         if (!link) continue;
         if (isPersonalLI(link)) personalHits.push({ url: link, title, snippet });
         else if (isCompanyLI(link)) companyHits.push({ url: link, title, snippet });
+
+        // Save Serper metadata keyed by canonical URL (first seen wins)
+        const c = canonLinkedIn(link);
+        if (c && !serperMetaByUrl.has(c)) {
+          serperMetaByUrl.set(c, { ...it, query: q });
+        }
       }
+      const pThis = personalHits.length - pBefore;
+      const cThis = companyHits.length - cBefore;
+      processed += 1;
       await logEvent(job.id as string, 'debug', 'Query processed', {
         q,
-        found: { personal: personalHits.length, company: companyHits.length }
+        kind: /site:linkedin\.com\/in\b/i.test(q) ? 'personal' : (/site:linkedin\.com\/company\b/i.test(q) ? 'company' : 'unknown'),
+        hitsThisQuery: { personal: pThis, company: cThis },
+        found: { personal: personalHits.length, company: companyHits.length },
+        processed,
+        total: totalQueries
       });
+      // Emit periodic info-level progress for UI visibility
+      if (processed === totalQueries || processed % infoEvery === 0) {
+        await logEvent(job.id as string, 'info', 'Search progress', {
+          processed,
+          total: totalQueries,
+          lastQuery: q,
+          kind: /site:linkedin\.com\/in\b/i.test(q) ? 'personal' : (/site:linkedin\.com\/company\b/i.test(q) ? 'company' : 'unknown'),
+          hitsThisQuery: { personal: pThis, company: cThis },
+          found: { personal: personalHits.length, company: companyHits.length }
+        });
+        if (rootJobId) {
+          try {
+            await logEvent(rootJobId, 'info', 'Person LI: search progress', {
+              childJobId: job.id,
+              processed,
+              total: totalQueries,
+              lastQuery: q,
+              kind: /site:linkedin\.com\/in\b/i.test(q) ? 'personal' : (/site:linkedin\.com\/company\b/i.test(q) ? 'company' : 'unknown'),
+              hitsThisQuery: { personal: pThis, company: cThis },
+              found: { personal: personalHits.length, company: companyHits.length }
+            });
+          } catch {}
+        }
+      }
       await sleep(PERSON_SERPER_JITTER_MS);
     }
 
     // Normalize, dedupe, and seed with siteFetch links
     const personalSet = new Map<string, Hit>();
     const companySet = new Map<string, Hit>();
+    await logEvent(job.id as string, 'info', 'Seeding candidate sets from context', { personalSeedCount: personalSeeds.length, companySeedCount: companySeeds.length });
     for (const seed of personalSeeds) {
       const c = canonLinkedIn(seed);
       if (c && isPersonalLI(c)) personalSet.set(c, { url: c });
@@ -275,15 +365,34 @@ export default new Worker("person-linkedin", async job => {
       counts: { personal: personalSet.size, company: companySet.size },
       seeds: { personal: personalSeeds.length, company: companySeeds.length }
     });
+    // Log candidate URL lists for visibility
+    const personalUrls = Array.from(personalSet.keys());
+    const companyUrls = Array.from(companySet.keys());
+    await logEvent(job.id as string, 'info', 'Candidate URLs', {
+      personal: personalUrls,
+      company: companyUrls
+    });
+    // Also include Serper metadata (raw organic items where available)
+    const personalSerper = personalUrls.map(u => ({ url: u, serper: serperMetaByUrl.get(u) || { source: 'seed' } }));
+    const companySerper = companyUrls.map(u => ({ url: u, serper: serperMetaByUrl.get(u) || { source: 'seed' } }));
+    await logEvent(job.id as string, 'info', 'Serper returns for candidates', {
+      personal: personalSerper,
+      company: companySerper
+    });
     if (rootJobId) {
       try { await logEvent(rootJobId, 'info', 'Person LI aggregated candidates', { counts: { personal: personalSet.size, company: companySet.size } }); } catch {}
     }
 
     // Score candidates with LLM
-    const personalCandidates = Array.from(personalSet.values()).slice(0, PERSON_MAX_PERSONAL_CANDIDATES);
-    const companyCandidates = Array.from(companySet.values()).slice(0, PERSON_MAX_COMPANY_CANDIDATES);
+    const personalCandidates = Array.from(personalSet.values());
+    const companyCandidates = Array.from(companySet.values());
+    await logEvent(job.id as string, 'info', 'Scoring phase started', { personal: personalCandidates.length, company: companyCandidates.length });
+    if (rootJobId) {
+      try { await logEvent(rootJobId, 'info', 'Person LI: scoring started', { childJobId: job.id, personal: personalCandidates.length, company: companyCandidates.length }); } catch {}
+    }
 
     const personalScored: Array<{ url: string; relevance: number; confidence: number; rationale: string }> = [];
+    let psProcessed = 0;
     for (const c of personalCandidates) {
       const s = await scorePersonalCandidate({
         fullName,
@@ -294,14 +403,25 @@ export default new Worker("person-linkedin", async job => {
         candidate: c,
         jobId: job.id as string,
       });
-      if (s) personalScored.push({ url: c.url, ...s });
+      if (s) {
+        personalScored.push({ url: c.url, ...s });
+        await logEvent(job.id as string, 'info', 'AI score (personal)', { url: c.url, relevance: s.relevance, confidence: s.confidence });
+      }
+      psProcessed += 1;
+      await logEvent(job.id as string, 'debug', 'Scored personal candidate', { i: psProcessed, n: personalCandidates.length, url: c.url });
       await sleep(500);
     }
 
     const companyScored: Array<{ url: string; relevance: number; confidence: number; rationale: string }> = [];
+    let csProcessed = 0;
     for (const c of companyCandidates) {
       const s = await scoreCompanyCandidate({ companyNames, trading: tradingNames, candidate: c, jobId: job.id as string });
-      if (s) companyScored.push({ url: c.url, ...s });
+      if (s) {
+        companyScored.push({ url: c.url, ...s });
+        await logEvent(job.id as string, 'info', 'AI score (company)', { url: c.url, relevance: s.relevance, confidence: s.confidence });
+      }
+      csProcessed += 1;
+      await logEvent(job.id as string, 'debug', 'Scored company candidate', { i: csProcessed, n: companyCandidates.length, url: c.url });
       await sleep(400);
     }
 
@@ -337,6 +457,10 @@ export default new Worker("person-linkedin", async job => {
         company: companyScored
       }
     });
+    await logEvent(job.id as string, 'info', 'Person LI completed', { personal: personalScored.length, company: companyScored.length });
+    if (rootJobId) {
+      try { await logEvent(rootJobId, 'info', 'Person LI: completed', { childJobId: job.id, personal: personalScored.length, company: companyScored.length }); } catch {}
+    }
     logger.info({ personId: personId || null, personal: personalScored.length, company: companyScored.length }, 'Person LinkedIn discovery done');
   } catch (err) {
     await failJob(job.id as string, err);

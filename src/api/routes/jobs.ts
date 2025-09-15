@@ -39,8 +39,38 @@ router.post("/jobs/company-discovery", async (req, res) => {
 });
 
 router.post("/jobs/person-linkedin", async (req, res) => {
-  const { personId } = z.object({ personId: z.string().min(3) }).parse(req.body);
-  const jobId = `person:${personId}`;
-  await personQ.add("discover", { personId }, { jobId, attempts: 5, backoff: { type: "exponential", delay: 2000 } });
+  // Accept either { personId } OR a full payload { person, context, rootJobId }
+  const body: any = req.body || {};
+  const byId = z.object({ personId: z.string().min(3) }).safeParse(body);
+  let data: any = null;
+  let jobId: string;
+  if (byId.success) {
+    data = { personId: byId.data.personId };
+    jobId = `person:${byId.data.personId}`;
+  } else {
+    const byPayload = z.object({
+      person: z.object({
+        firstName: z.string().min(1),
+        middleNames: z.string().optional(),
+        lastName: z.string().min(1),
+        dob: z.string().optional()
+      }),
+      context: z.object({
+        companyNumber: z.string().optional(),
+        companyName: z.string().optional(),
+        websites: z.array(z.string()).optional(),
+        companyLinkedIns: z.array(z.string()).optional(),
+        personalLinkedIns: z.array(z.string()).optional()
+      }).optional(),
+      rootJobId: z.string().optional(),
+      jobId: z.string().optional()
+    }).safeParse(body);
+    if (!byPayload.success) {
+      return res.status(400).json({ error: 'invalid_request' });
+    }
+    data = { person: byPayload.data.person, context: byPayload.data.context, rootJobId: byPayload.data.rootJobId };
+    jobId = byPayload.data.jobId || `person:${Date.now()}`;
+  }
+  await personQ.add("discover", data, { jobId, attempts: 5, backoff: { type: "exponential", delay: 2000 } });
   res.json({ jobId });
 });
