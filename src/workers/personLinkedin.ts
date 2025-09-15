@@ -3,6 +3,8 @@ import { Worker } from "bullmq";
 import { connection } from "../queues/index.js";
 import { fetch } from "undici";
 import { logger } from "../lib/logger.js";
+import { query } from "../lib/db.js";
+import { normalizeWord, nameMatches } from "../lib/normalize.js";
 import { initDb, startJob, logEvent, completeJob, failJob } from "../lib/progress.js";
 import { base } from "../lib/airtable.js";
 const WRITE_TO_AIRTABLE = (process.env.WRITE_TO_AIRTABLE || "").toLowerCase() === 'true';
@@ -10,6 +12,7 @@ const WRITE_TO_AIRTABLE = (process.env.WRITE_TO_AIRTABLE || "").toLowerCase() ==
 const SERPER_API_KEY = process.env.SERPER_API_KEY || "";
 const LLM_DEBUG_LOGS = (process.env.LLM_DEBUG_LOGS || "").toLowerCase() === 'true';
 const PERSON_SERPER_JITTER_MS = 900;
+const PERSON_LI_ACCEPT_THRESHOLD = Number(process.env.PERSON_LI_ACCEPT_THRESHOLD || 0.7);
 
 async function serperSearch(q: string) {
   const res = await fetch("https://google.serper.dev/search", {
@@ -434,6 +437,87 @@ export default new Worker("person-linkedin", async job => {
     });
     if (rootJobId) {
       try { await logEvent(rootJobId, 'info', 'Person LI scored candidates', { personal_top: personalScored.slice(0,3), company_top: companyScored.slice(0,3) }); } catch {}
+    }
+
+    // Persist top-rated LinkedIns into ch_appointments for the matching person under this workflow
+    try {
+      if (rootJobId) {
+        const acceptedPersonal = personalScored.filter(x => (x.relevance ?? 0) >= PERSON_LI_ACCEPT_THRESHOLD);
+        const acceptedCompany = companyScored.filter(x => (x.relevance ?? 0) >= PERSON_LI_ACCEPT_THRESHOLD);
+        if (acceptedPersonal.length || acceptedCompany.length) {
+          const { rows: ppl } = await query<{ id: number; first_name: string; last_name: string; full_name: string }>(
+            `SELECT id, first_name, last_name, full_name FROM ch_people WHERE job_id = $1`,
+            [rootJobId]
+          );
+          let targetPersonId: number | null = null;
+          for (const r of ppl) {
+            const cand = { first: r.first_name || '', last: r.last_name || '' };
+            if (nameMatches({ first, last }, cand)) { targetPersonId = r.id; break; }
+            if (normalizeWord(r.first_name || '') === normalizeWord(first) && normalizeWord(r.last_name || '') === normalizeWord(last)) { targetPersonId = r.id; break; }
+          }
+          if (!targetPersonId && ppl.length === 1) targetPersonId = ppl[0].id;
+
+          if (targetPersonId) {
+            const addPersonalUrls = JSON.stringify(acceptedPersonal.map(x => x.url));
+            const addPersonalVerif = JSON.stringify(acceptedPersonal.map(x => ({ url: x.url, relevance: x.relevance, confidence: x.confidence, rationale: x.rationale })));
+            const addCompanyUrls = JSON.stringify(acceptedCompany.map(x => x.url));
+            const addCompanyVerif = JSON.stringify(acceptedCompany.map(x => ({ url: x.url, relevance: x.relevance, confidence: x.confidence, rationale: x.rationale })));
+            await query(
+              `UPDATE ch_appointments
+                 SET
+                   verified_director_linkedIns = (
+                     SELECT CASE WHEN jsonb_typeof(COALESCE(verified_director_linkedIns, '[]'::jsonb)) = 'array'
+                                 THEN (
+                                   SELECT jsonb_agg(DISTINCT j.value)
+                                     FROM jsonb_array_elements(COALESCE(verified_director_linkedIns, '[]'::jsonb) || $1::jsonb) AS j(value)
+                                 )
+                                 ELSE $1::jsonb
+                            END
+                   ),
+                   director_linkedIn_verification = (
+                     SELECT CASE WHEN jsonb_typeof(COALESCE(director_linkedIn_verification, '[]'::jsonb)) = 'array'
+                                 THEN (
+                                   SELECT jsonb_agg(DISTINCT j.value)
+                                     FROM jsonb_array_elements(COALESCE(director_linkedIn_verification, '[]'::jsonb) || $2::jsonb) AS j(value)
+                                 )
+                                 ELSE $2::jsonb
+                            END
+                   ),
+                   verified_company_linkedIns = (
+                     SELECT CASE WHEN jsonb_typeof(COALESCE(verified_company_linkedIns, '[]'::jsonb)) = 'array'
+                                 THEN (
+                                   SELECT jsonb_agg(DISTINCT j.value)
+                                     FROM jsonb_array_elements(COALESCE(verified_company_linkedIns, '[]'::jsonb) || $3::jsonb) AS j(value)
+                                 )
+                                 ELSE $3::jsonb
+                            END
+                   ),
+                   company_linkedIn_verification = (
+                     SELECT CASE WHEN jsonb_typeof(COALESCE(company_linkedIn_verification, '[]'::jsonb)) = 'array'
+                                 THEN (
+                                   SELECT jsonb_agg(DISTINCT j.value)
+                                     FROM jsonb_array_elements(COALESCE(company_linkedIn_verification, '[]'::jsonb) || $4::jsonb) AS j(value)
+                                 )
+                                 ELSE $4::jsonb
+                            END
+                   ),
+                   updated_at = now()
+               WHERE person_id = $5`,
+              [addPersonalUrls, addPersonalVerif, addCompanyUrls, addCompanyVerif, targetPersonId]
+            );
+            await logEvent(job.id as string, 'info', 'Persisted LinkedIns to ch_appointments', { person_id: targetPersonId, personal_added: acceptedPersonal.length, company_added: acceptedCompany.length, threshold: PERSON_LI_ACCEPT_THRESHOLD });
+            if (rootJobId) {
+              try { await logEvent(rootJobId, 'info', 'Person LI: persisted LinkedIns', { childJobId: job.id, person_id: targetPersonId, personal_added: acceptedPersonal.length, company_added: acceptedCompany.length }); } catch {}
+            }
+          } else {
+            await logEvent(job.id as string, 'warn', 'Could not match person for persistence', { rootJobId, fullName, first, last });
+          }
+        } else {
+          await logEvent(job.id as string, 'info', 'No LinkedIns met threshold for persistence', { threshold: PERSON_LI_ACCEPT_THRESHOLD });
+        }
+      }
+    } catch (e) {
+      await logEvent(job.id as string, 'error', 'Failed to persist LinkedIns to ch_appointments', { error: String(e) });
     }
 
     // Airtable write (optional): store top personal candidates
