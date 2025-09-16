@@ -411,12 +411,12 @@ export default new Worker("ch-appointments", async job => {
       if (peopleRecords.length) await batchCreate("People", peopleRecords.map(({ fields }) => ({ fields })));
       if (appointmentRecords.length) await batchCreate("Appointments", appointmentRecords);
     } else {
-      await logEvent(job.id as string, 'info', 'Airtable write skipped', {
-        reason: 'WRITE_TO_AIRTABLE=false',
-        tables: ['People', 'Appointments'],
-        people: peopleRecords.length,
-        appointments: appointmentRecords.length
-      });
+      // await logEvent(job.id as string, 'info', 'Airtable write skipped', {
+      //   reason: 'WRITE_TO_AIRTABLE=false',
+      //   tables: ['People', 'Appointments'],
+      //   people: peopleRecords.length,
+      //   appointments: appointmentRecords.length
+      // });
     }
     
 // Persist enriched results to Postgres for next-stage processing

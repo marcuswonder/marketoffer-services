@@ -7,6 +7,8 @@ import { logger } from "../lib/logger.js";
 import { fetch } from "undici";
 import { cleanCompanyName, baseHost } from "../lib/normalize.js";
 import { query } from "../lib/db.js";
+import fs from "fs";
+import path from "path";
 
 type JobPayload = {
   host: string;
@@ -19,7 +21,7 @@ type JobPayload = {
 
 const BEE_KEY = process.env.SCRAPINGBEE_API_KEY || "";
 const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
-const BEE_MAX_PAGES = Number(process.env.SITEFETCH_BEE_MAX_PAGES || 1); // cap Bee calls per job
+const BEE_MAX_PAGES = Number(process.env.SITEFETCH_BEE_MAX_PAGES || 1);
 const STATIC_TIMEOUT_MS = Number(process.env.SITEFETCH_STATIC_TIMEOUT_MS || 7000);
 const LLM_ONLY = (process.env.LLM_ONLY_WEBSITE_VALIDATION || "").toLowerCase() === 'true';
 const ACCEPT_THRESHOLD = Number(process.env.SITEFETCH_ACCEPT_THRESHOLD || 0.75);
@@ -27,18 +29,13 @@ const MAX_PAGES_FOR_LLM = Number(process.env.SITEFETCH_MAX_PAGES || 5);
 const SNIPPET_CHARS = Number(process.env.SITEFETCH_MAX_SNIPPET_CHARS || 800);
 const LLM_DEBUG_LOGS = (process.env.LLM_DEBUG_LOGS || "").toLowerCase() === 'true';
 
-const COMMON_PATHS = [
-  "/",
-  "/about",
-  "/about-us",
-  "/company",
-  "/our-company",
-  "/team",
-  "/contact",
-  "/privacy",
-  "/privacy-policy",
-  "/impressum"
-];
+// Load common URL endings from shared config; required (fail fast if missing/invalid)
+const endingsPath = path.join(process.cwd(), "config", "commonUrlEndings.json");
+const loadedEndings = JSON.parse(fs.readFileSync(endingsPath, 'utf-8'));
+if (!Array.isArray(loadedEndings)) {
+  throw new Error("Invalid commonUrlEndings.json: expected an array of strings");
+}
+const COMMON_PATHS: string[] = Array.from(new Set(loadedEndings));
 
 await initDb();
 
@@ -560,18 +557,17 @@ export default new Worker("site-fetch", async job => {
       }
     }
 
-    // Deterministic acceptance: exact CH number, exact company name, or full registered address
+    // Deterministic acceptance: exact CH number, exact company name, or exact postcode
     if (!abortHost && !earlyAccepted) {
       const normCoName = normalizeStrict(companyName || '');
-      const normAddr = normalize((address || ''));
-      let addrMatch = false, nameMatch = false, numMatch = false;
+      const targetPc = (postcode || '').toUpperCase().replace(/\s+/g, '');
+      let pcExact = false, nameMatch = false, numMatch = false;
       for (const p of pageEvidence) {
         if (targetNum && p.company_numbers.includes(targetNum)) numMatch = true;
         const jsn = p.jsonld_org_name ? normalizeStrict(p.jsonld_org_name) : '';
         if (normCoName && jsn && jsn === normCoName) nameMatch = true;
-        const body = normalize(p.text_snippet);
-        if (normAddr && body.includes(normAddr)) addrMatch = true;
-        if (numMatch || nameMatch || addrMatch) break;
+        if (targetPc && Array.isArray(p.postcodes) && p.postcodes.some(pc => (pc || '').toString().toUpperCase().replace(/\s+/g, '') === targetPc)) pcExact = true;
+        if (numMatch || nameMatch || pcExact) break;
       }
       if (numMatch) {
         bestScore = Math.max(bestScore, 0.95);
@@ -579,9 +575,9 @@ export default new Worker("site-fetch", async job => {
       } else if (nameMatch) {
         bestScore = Math.max(bestScore, 0.9);
         bestRationale = 'Deterministic: JSON-LD organization name matches company name exactly';
-      } else if (addrMatch) {
+      } else if (pcExact) {
         bestScore = Math.max(bestScore, 0.9);
-        bestRationale = 'Deterministic: full registered address found on pages';
+        bestRationale = 'Deterministic: exact postcode found on pages';
       }
     }
 

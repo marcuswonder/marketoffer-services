@@ -20,8 +20,6 @@ const genericHostsPath = path.join(process.cwd(), "config", "genericHosts.json")
 const genericHosts:Set<string> = new Set(
   (JSON.parse(fs.readFileSync(genericHostsPath, "utf-8")) as string[]).map(s => s.toLowerCase())
 );
-const endingsPath = path.join(process.cwd(), "config", "commonUrlEndings.json");
-const COMMON_ENDINGS: string[] = JSON.parse(fs.readFileSync(endingsPath, 'utf-8'));
 const sicMapPath = path.join(process.cwd(), "config", "sicCodes.json");
 const sicEntries: Array<{ code: number; key_phrases?: string[]; description?: string }> = JSON.parse(fs.readFileSync(sicMapPath, 'utf-8'));
 const sicToPhrases = new Map<string, string[]>(sicEntries.map(e => [String(e.code), Array.isArray(e.key_phrases) ? e.key_phrases : []]));
