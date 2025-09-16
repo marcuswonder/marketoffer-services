@@ -6,6 +6,7 @@ import { router as progressRouter } from "./routes/progress.js";
 import { router as uiRouter } from "./routes/ui.js";
 import { router as settingsRouter } from "./routes/settings.js";
 import { router as requestRouter } from "./routes/request.js";
+import { router as settingsUiRouter } from "./routes/settings_ui.js";
 import { ExpressAdapter } from "@bull-board/express";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
 import { createBullBoard } from "@bull-board/api";
@@ -37,6 +38,7 @@ createBullBoard({
 app.use("/admin/queues", serverAdapter.getRouter());
 app.use("/admin/workflows", uiRouter);
 app.use("/admin/request", requestRouter);
+app.use("/admin/settings", settingsUiRouter);
 
 const port = Number(process.env.PORT || 3000);
 app.listen(port, () => logger.info({ port }, "API listening"));
