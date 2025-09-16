@@ -480,6 +480,17 @@ export default new Worker("site-fetch", async job => {
         const waitMs = isLegal(candidate.url) ? 3000 : undefined;
         const waitFor = isLegal(candidate.url) ? 'p span' : undefined;
         const r = await fetchBeeHtml(candidate.url, preferFull, waitMs, waitFor);
+        try {
+          await logEvent(job.id as string, 'info', 'Bee fetch', {
+            url: candidate.url,
+            status: r.status,
+            bytes: (r.html || '').length,
+            preferFull,
+            waitMs: waitMs || 0,
+            waitFor: waitFor || '',
+            snippet: stripTags(r.html || '').slice(0, 600)
+          });
+        } catch {}
         if (r.status >= 200 && r.status < 400 && r.html.length >= 200) {
           beeCalls += 1;
           const sig = parseHtmlSignals(r.html);
@@ -524,6 +535,17 @@ export default new Worker("site-fetch", async job => {
             for (const ifu of iframes) {
               if (used >= BEE_MAX_PAGES) break;
               const ri = await fetchBeeHtml(ifu, true, 3000, 'p span');
+              try {
+                await logEvent(job.id as string, 'info', 'Bee fetch (iframe)', {
+                  url: ifu,
+                  status: ri.status,
+                  bytes: (ri.html || '').length,
+                  preferFull: true,
+                  waitMs: 3000,
+                  waitFor: 'p span',
+                  snippet: stripTags(ri.html || '').slice(0, 600)
+                });
+              } catch {}
               if (ri.status >= 200 && ri.status < 400 && ri.html.length >= 200) {
                 beeCalls += 1;
                 const isig = parseHtmlSignals(ri.html);
