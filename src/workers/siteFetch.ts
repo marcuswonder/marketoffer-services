@@ -376,6 +376,16 @@ export default new Worker("site-fetch", async job => {
     // First pass: cheap static fetch to avoid ScrapingBee credits on obvious 404/robots/generic pages
     for (const url of urls) {
       const r = await fetchStaticHtml(url);
+      // Log raw static fetch (status + size + short snippet) for diagnostics
+      try {
+        await logEvent(job.id as string, 'info', 'Static fetch', {
+          url,
+          status: r.status,
+          bytes: (r.html || '').length,
+          contentType: r.contentType || '',
+          snippet: stripTags(r.html || '').slice(0, 600)
+        });
+      } catch {}
       if (r.status >= 200 && r.status < 400 && r.html.length >= 200) {
         staticOk.push({ url, status: r.status, html: r.html });
         const sig = parseHtmlSignals(r.html);
