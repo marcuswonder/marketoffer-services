@@ -1,6 +1,17 @@
 import { query, ensureConnection } from './db.js';
 import { logger } from './logger.js';
 
+// Cache jobId -> queue to enrich events without extra DB lookups
+const jobQueueCache = new Map<string, string>();
+
+function slugify(s: string) {
+  return (s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 64);
+}
+
 export async function initDb() {
   await ensureConnection();
   await query(`
@@ -92,12 +103,34 @@ export async function startJob(opts: { jobId: string; queue: string; name: strin
      DO UPDATE SET status='running', data=$4, updated_at=now()`,
     [jobId, queue, name, payload ? JSON.stringify(payload) : null]
   );
+  try { jobQueueCache.set(jobId, queue); } catch {}
 }
 
 export async function logEvent(jobId: string, level: 'debug'|'info'|'warn'|'error', message: string, data?: any) {
+  // Enrich with scope/category/code when not provided
+  let enriched: any = data && typeof data === 'object' ? { ...data } : {};
+  if (!('scope' in enriched)) {
+    enriched.scope = level === 'debug' ? 'trace' : (level === 'info' ? 'detail' : 'summary');
+  }
+  if (!('category' in enriched) || !enriched.category) {
+    let q = jobQueueCache.get(jobId);
+    if (!q) {
+      try {
+        const { rows } = await query<{ queue: string }>(`SELECT queue FROM job_progress WHERE job_id = $1 LIMIT 1`, [jobId]);
+        q = rows?.[0]?.queue || 'general';
+        jobQueueCache.set(jobId, q);
+      } catch {
+        q = 'general';
+      }
+    }
+    enriched.category = q;
+  }
+  if (!('code' in enriched) || !enriched.code) {
+    enriched.code = `${enriched.category}.${slugify(message)}`;
+  }
   await query(
     `INSERT INTO job_events(job_id, level, message, data) VALUES ($1,$2,$3,$4)`,
-    [jobId, level, message, data ? JSON.stringify(data) : null]
+    [jobId, level, message, JSON.stringify(enriched)]
   );
 }
 

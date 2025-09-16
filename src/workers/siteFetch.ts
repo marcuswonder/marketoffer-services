@@ -625,6 +625,7 @@ export default new Worker("site-fetch", async job => {
     // (Non-LLM paths will simply leave decision_confidence undefined.)
 
     await logEvent(job.id as string, 'info', 'SiteFetch results', {
+      scope: 'summary',
       host,
       score: bestScore,
       validated_websites,
@@ -695,6 +696,7 @@ export default new Worker("site-fetch", async job => {
         [addWebsites, addVerifications, addCompanyLIs, addPersonalLIs, companyNumber]
       );
       await logEvent(job.id as string, 'info', 'Updated ch_appointments with siteFetch results', {
+        scope: 'summary',
         companyNumber,
         websites_added: validated_websites.length,
         company_linkedins_added: persistLIs ? Array.from(foundCompanyLIs).length : 0,
@@ -819,7 +821,7 @@ export default new Worker("site-fetch", async job => {
             );
             enqueued++;
           }
-          await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after ALL discovery complete', { rootJobId: root, people: people.length, enqueued });
+          await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after ALL discovery complete', { scope: 'summary', rootJobId: root, people: people.length, enqueued });
         }
       } else {
         // Backward-compatible behavior: if no workflow root, fallback to per-company aggregation
@@ -904,7 +906,7 @@ export default new Worker("site-fetch", async job => {
             );
             enqueued++;
           }
-          await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after siteFetch aggregation', { companyNumber, people: people.length, enqueued });
+          await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after siteFetch aggregation', { scope: 'summary', companyNumber, people: people.length, enqueued });
         }
       }
     } catch (e) {

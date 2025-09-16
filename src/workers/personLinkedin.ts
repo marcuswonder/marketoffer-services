@@ -448,6 +448,7 @@ export default new Worker("person-linkedin", async job => {
     companyScored.sort((a,b)=> (b.relevance - a.relevance) || (b.confidence - a.confidence));
 
     await logEvent(job.id as string, 'info', 'Scored LinkedIn candidates', {
+      scope: 'summary',
       personal_top: personalScored.slice(0,3),
       company_top: companyScored.slice(0,3)
     });
@@ -558,7 +559,7 @@ export default new Worker("person-linkedin", async job => {
       }
     });
     try { await logEvent(job.id as string, 'info', 'Usage summary', { serper_calls: serperCalls }); } catch {}
-    await logEvent(job.id as string, 'info', 'Person LI completed', { personal: personalScored.length, company: companyScored.length });
+    await logEvent(job.id as string, 'info', 'Person LI completed', { scope: 'summary', personal: personalScored.length, company: companyScored.length });
     if (rootJobId) {
       try { await logEvent(rootJobId, 'info', 'Person LI: completed', { childJobId: job.id, personal: personalScored.length, company: companyScored.length }); } catch {}
     }

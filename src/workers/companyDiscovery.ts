@@ -264,7 +264,7 @@ Return strict JSON with both decision certainty and ownership likelihood:
       await siteFetchQ.add('fetch', payload, { jobId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
       enqueued++;
     }
-    await logEvent(job.id as string, 'info', 'Enqueued site-fetch jobs', { enqueued, hosts: potentials });
+    await logEvent(job.id as string, 'info', 'Enqueued site-fetch jobs', { scope: 'summary', enqueued, hosts: potentials });
     try { await logEvent(job.id as string, 'info', 'Usage summary', { serper_calls: serperCalls }); } catch {}
 
     // If this workflow uses a rootJobId, and if all discovery work is finished (no running company-discovery or site-fetch),
