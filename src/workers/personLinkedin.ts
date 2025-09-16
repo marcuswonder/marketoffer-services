@@ -88,6 +88,13 @@ async function scorePersonalCandidate(opts: {
     return null;
   }
   const data: any = await res.json();
+  try {
+    const usage = (data as any)?.usage || null;
+    const model = (data as any)?.model || (data as any)?.id || 'unknown';
+    if (usage) {
+      await logEvent(opts.jobId, 'info', 'LLM usage', { worker: 'person', kind: 'personal', model, usage });
+    }
+  } catch {}
   const txt = data?.choices?.[0]?.message?.content || '{}';
   try {
     const obj = JSON.parse(txt);
@@ -135,6 +142,13 @@ async function scoreCompanyCandidate(opts: {
     return null;
   }
   const data: any = await res.json();
+  try {
+    const usage = (data as any)?.usage || null;
+    const model = (data as any)?.model || (data as any)?.id || 'unknown';
+    if (usage) {
+      await logEvent(opts.jobId, 'info', 'LLM usage', { worker: 'person', kind: 'company', model, usage });
+    }
+  } catch {}
   const txt = data?.choices?.[0]?.message?.content || '{}';
   try {
     const obj = JSON.parse(txt);
@@ -260,6 +274,7 @@ export default new Worker("person-linkedin", async job => {
     // Track first-seen Serper organic item per canonical URL for later logging
     const serperMetaByUrl = new Map<string, any>();
     const totalQueries = personalQueries.length + companyQueries.length;
+    let serperCalls = 0;
     if (totalQueries === 0) {
       await logEvent(job.id as string, 'warn', 'No queries to run', { reason: 'empty_name_or_context' });
       if (rootJobId) {
@@ -275,6 +290,7 @@ export default new Worker("person-linkedin", async job => {
     const infoEvery = Math.max(1, Math.floor(totalQueries / 5));
     for (const q of [...personalQueries, ...companyQueries]) {
       const data = await serperSearch(q);
+      serperCalls += 1;
       const organic = Array.isArray((data as any).organic) ? (data as any).organic : [];
       // Log Serper raw results (trimmed) so we can assess query quality
       try {
@@ -541,6 +557,7 @@ export default new Worker("person-linkedin", async job => {
         company: companyScored
       }
     });
+    try { await logEvent(job.id as string, 'info', 'Usage summary', { serper_calls: serperCalls }); } catch {}
     await logEvent(job.id as string, 'info', 'Person LI completed', { personal: personalScored.length, company: companyScored.length });
     if (rootJobId) {
       try { await logEvent(rootJobId, 'info', 'Person LI: completed', { childJobId: job.id, personal: personalScored.length, company: companyScored.length }); } catch {}

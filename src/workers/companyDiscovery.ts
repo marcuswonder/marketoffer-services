@@ -86,8 +86,10 @@ export default new Worker("company-discovery", async job => {
       return false;
     };
     const baseSimple = `${companyName} UK`;
+    let serperCalls = 0;
     for (const q of queries) {
       const resp = await serperSearch(q);
+      serperCalls += 1;
       const data = resp.data as any;
       let organic = asArray((data as any).organic).slice(0, 10);
       let peopleAlso = asArray((data as any).peopleAlsoSearch).slice(0, 10);
@@ -221,6 +223,12 @@ Return strict JSON with both decision certainty and ownership likelihood:
         });
         if (!res.ok) return null;
         const data: any = await res.json();
+        try {
+          const usage = (data as any)?.usage || null;
+          const model = (data as any)?.model || (data as any)?.id || 'unknown';
+          // No jobId here; log on this worker's job id via outer scope if desired later.
+          await logEvent((job as any).id as string, 'info', 'LLM usage', { worker: 'company-discovery', model, usage });
+        } catch {}
         const txt = data?.choices?.[0]?.message?.content || '{}';
         const obj = JSON.parse(txt);
         const decision_confidence = typeof obj.decision_confidence === 'number' ? Math.max(0, Math.min(1, obj.decision_confidence)) : 0;
@@ -257,6 +265,7 @@ Return strict JSON with both decision certainty and ownership likelihood:
       enqueued++;
     }
     await logEvent(job.id as string, 'info', 'Enqueued site-fetch jobs', { enqueued, hosts: potentials });
+    try { await logEvent(job.id as string, 'info', 'Usage summary', { serper_calls: serperCalls }); } catch {}
 
     // If this workflow uses a rootJobId, and if all discovery work is finished (no running company-discovery or site-fetch),
     // kick off person-linkedin here as a safety net (e.g., when no sites were found for any company).

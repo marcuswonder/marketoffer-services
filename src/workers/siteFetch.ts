@@ -323,6 +323,13 @@ Return strict JSON with both decision certainty and ownership likelihood:
     });
     if (!res.ok) return null;
     const data: any = await res.json();
+    try {
+      const usage = (data as any)?.usage || null;
+      const model = (data as any)?.model || (data as any)?.id || 'unknown';
+      if (usage && params.jobId) {
+        await logEvent(params.jobId, 'info', 'LLM usage', { worker: 'site-fetch', model, usage });
+      }
+    } catch {}
     const txt = data?.choices?.[0]?.message?.content || '{}';
     const obj = JSON.parse(txt);
     const decision_confidence = typeof obj.decision_confidence === 'number' ? Math.max(0, Math.min(1, obj.decision_confidence)) : 0;
@@ -358,6 +365,7 @@ export default new Worker("site-fetch", async job => {
     let bestRationale = "";
     const foundCompanyLIs = new Set<string>();
     const foundPersonalLIs = new Set<string>();
+    let beeCalls = 0;
     const staticOk: Array<{ url: string; status: number; html: string }> = [];
     const targetNum = (companyNumber || "").toUpperCase();
     let abortHost = false;
@@ -473,6 +481,7 @@ export default new Worker("site-fetch", async job => {
         const waitFor = isLegal(candidate.url) ? 'p span' : undefined;
         const r = await fetchBeeHtml(candidate.url, preferFull, waitMs, waitFor);
         if (r.status >= 200 && r.status < 400 && r.html.length >= 200) {
+          beeCalls += 1;
           const sig = parseHtmlSignals(r.html);
           for (const li of sig.linkedins) {
             if (/linkedin\.com\/company\//i.test(li)) foundCompanyLIs.add(li);
@@ -516,6 +525,7 @@ export default new Worker("site-fetch", async job => {
               if (used >= BEE_MAX_PAGES) break;
               const ri = await fetchBeeHtml(ifu, true, 3000, 'p span');
               if (ri.status >= 200 && ri.status < 400 && ri.html.length >= 200) {
+                beeCalls += 1;
                 const isig = parseHtmlSignals(ri.html);
                 const inums = extractCompanyNumbers(isig.textChunk);
                 const ipcs = Array.from(new Set((isig.textChunk.match(/[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/gi) || []).map(s => s.toUpperCase())));
@@ -587,6 +597,7 @@ export default new Worker("site-fetch", async job => {
       const usedPages = pageEvidence.slice(0, MAX_PAGES_FOR_LLM);
       const decision = await llmEvaluateHost({ host, companyName, companyNumber, postcode, pages: usedPages, jobId: job.id as string });
       if (decision) {
+        // token usage logged inside llmEvaluateHost (debug + info)
         // Use company_relevance to score ownership likelihood. Keep rationale prefixed.
         bestScore = decision.company_relevance;
         bestRationale = `LLM: ${decision.rationale}`;
@@ -630,6 +641,7 @@ export default new Worker("site-fetch", async job => {
       linkedins: Array.from(new Set([...foundCompanyLIs, ...foundPersonalLIs])),
       rootJobId: (job.data as any)?.rootJobId || null
     });
+    try { await logEvent(job.id as string, 'info', 'Usage summary', { scrapingbee_calls: beeCalls }); } catch {}
 
     // Persist results into ch_appointments for this company
     try {

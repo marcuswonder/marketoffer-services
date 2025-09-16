@@ -4,6 +4,7 @@ import { logger } from "../lib/logger.js";
 import { router as jobsRouter } from "./routes/jobs.js";
 import { router as progressRouter } from "./routes/progress.js";
 import { router as uiRouter } from "./routes/ui.js";
+import { router as settingsRouter } from "./routes/settings.js";
 import { router as requestRouter } from "./routes/request.js";
 import { ExpressAdapter } from "@bull-board/express";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
@@ -19,6 +20,7 @@ app.get("/health", (_req,res)=>res.json({ ok: true }));
 
 app.use("/api", jobsRouter);
 app.use("/api", progressRouter);
+app.use("/api", settingsRouter);
 
 // Bull Board UI at /admin/queues
 const serverAdapter = new ExpressAdapter();
