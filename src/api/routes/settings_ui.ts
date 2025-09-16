@@ -233,8 +233,8 @@ function renderPage(defaultsJson: string) {
   '    }',
   '    function attachValidation() {',
   '      ["sf_threshold","scr_weight_email","llm_temp_sf","llm_temp_person","llm_temp_company","person_accept"].forEach(id=>{',
-  '        $(id)?.addEventListener("input", ()=> clamp(id, 0, 1));
-      });',
+  '        $(id)?.addEventListener("input", ()=> clamp(id, 0, 1));',
+  '      });',
   '      ["sf_max_pages","serper_cap","cd_cap","person_personal_cap","person_company_cap"].forEach(id=>{',
   '        $(id)?.addEventListener("input", ()=> { const el=$(id); const v=Number(el.value); if (!Number.isFinite(v) || v<1) el.value = "1"; });',
   '      });',
