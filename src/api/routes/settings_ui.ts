@@ -1,8 +1,59 @@
 import { Router } from 'express';
+import fs from 'fs';
+import path from 'path';
 
 export const router = Router();
 
-const page = [
+function num(v: any, d: number) { const n = Number(v); return Number.isFinite(n) ? n : d; }
+function bool(v: any, d = false) { const s = (v || '').toString().toLowerCase(); if (s === 'true') return true; if (s === 'false') return false; return d; }
+
+function defaultsFromEnv() {
+  // SiteFetch
+  const sitefetch = {
+    acceptance_threshold: num(process.env.SITEFETCH_ACCEPT_THRESHOLD, 0.75),
+    llm_only: bool(process.env.LLM_ONLY_WEBSITE_VALIDATION, false),
+    max_pages_for_llm: num(process.env.SITEFETCH_MAX_PAGES, 5),
+    snippet_chars: num(process.env.SITEFETCH_MAX_SNIPPET_CHARS, 800)
+  };
+  // Scraping
+  let legalPriority: string[] = [
+    '/privacy', '/privacy-policy', '/impressum',
+    '/terms', '/terms-of-service', '/terms-and-conditions',
+    '/about', '/about-us', '/company', '/our-company', '/contact', '/'
+  ];
+  try {
+    const p = path.join(process.cwd(), 'config', 'commonUrlEndings.json');
+    const arr = JSON.parse(fs.readFileSync(p, 'utf-8')) as string[];
+    if (Array.isArray(arr) && arr.length) {
+      const legalFirst = arr.filter(x => /privacy|impressum|terms/i.test(x));
+      const rest = arr.filter(x => !/privacy|impressum|terms/i.test(x));
+      legalPriority = Array.from(new Set([...legalFirst, ...rest]));
+    }
+  } catch {}
+  const scraping = {
+    bee_max_pages: num(process.env.SITEFETCH_BEE_MAX_PAGES, 1),
+    legal_page_priority: legalPriority,
+    deterministic_rules: { exact_crn: true, jsonld_exact_name: true, exact_postcode: true },
+    weights: { email_domain_match: 0.10 }
+  };
+  const llm = {
+    models: { 'site-fetch': 'gpt-4o-mini', 'person-linkedin': 'gpt-4o-mini', 'company-discovery': 'gpt-4o-mini' },
+    temperature: { 'site-fetch': 0.1, 'person-linkedin': 0.2, 'company-discovery': 0.1 }
+  };
+  const serper = { gl: 'uk', hl: 'en', per_query_result_cap: 10 };
+  const company_discovery = { candidates_cap: 50 };
+  const person = {
+    personal_candidate_cap: num(process.env.PERSON_MAX_PERSONAL_CANDIDATES, 10),
+    company_candidate_cap: num(process.env.PERSON_MAX_COMPANY_CANDIDATES, 6),
+    acceptance_threshold_for_persistence: num(process.env.PERSON_LI_ACCEPT_THRESHOLD, 0.7)
+  };
+  const persistence = { write_to_airtable: bool(process.env.WRITE_TO_AIRTABLE, false) };
+  const pricing = { openai: { 'gpt-4o-mini': { prompt_per_1k: 0, completion_per_1k: 0 } }, serper: { per_call: 0 }, scrapingbee: { per_call: 0 } };
+  return { sitefetch, scraping, llm, serper, company_discovery, person, persistence, pricing };
+}
+
+function renderPage(defaultsJson: string) {
+  return [
   '<!doctype html>',
   '<html lang="en">',
   '<head>',
@@ -102,6 +153,7 @@ const page = [
   '    </div>',
   '  </div>',
   '  <script>',
+  `    const DEFAULTS = ${defaultsJson};`,
   '    const $ = (id) => document.getElementById(id);',
   '    function currentValues() {',
   '      const legal = ($("scr_legal_priority").value || "").split(/\n+/).map(s => s.trim()).filter(Boolean);',
@@ -175,24 +227,36 @@ const page = [
   '      $("persist_airtable").checked = !!s.persistence.write_to_airtable;',
   '      $("preview").textContent = JSON.stringify(s, null, 2);',
   '    }',
-  '    async function loadDefaults() {',
-  '      const res = await fetch("/api/settings/defaults");',
-  '      const s = await res.json();',
-  '      setValues(s);',
+  '    function clamp(id, min, max) {',
+  '      const el = $(id); if (!el) return; const v = Number(el.value); if (!Number.isFinite(v)) { el.value = String(min); return; }',
+  '      if (max != null && v > max) el.value = String(max); else if (min != null && v < min) el.value = String(min);',
   '    }',
-  '    $("resetBtn").addEventListener("click", async ()=>{ await loadDefaults(); });',
+  '    function attachValidation() {',
+  '      ["sf_threshold","scr_weight_email","llm_temp_sf","llm_temp_person","llm_temp_company","person_accept"].forEach(id=>{',
+  '        $(id)?.addEventListener("input", ()=> clamp(id, 0, 1));
+      });',
+  '      ["sf_max_pages","serper_cap","cd_cap","person_personal_cap","person_company_cap"].forEach(id=>{',
+  '        $(id)?.addEventListener("input", ()=> { const el=$(id); const v=Number(el.value); if (!Number.isFinite(v) || v<1) el.value = "1"; });',
+  '      });',
+  '      ["sf_snippet"].forEach(id=>{ $(id)?.addEventListener("input", ()=> { const el=$(id); const v=Number(el.value); if (!Number.isFinite(v) || v<200) el.value = "200"; }); });',
+  '      ["scr_bee_max"].forEach(id=>{ $(id)?.addEventListener("input", ()=> { const el=$(id); const v=Number(el.value); if (!Number.isFinite(v) || v<0) el.value = "0"; }); });',
+  '    }',
+  '    $("resetBtn").addEventListener("click", ()=>{ setValues(DEFAULTS); });',
   '    $("copyBtn").addEventListener("click", ()=>{',
   '      const s = currentValues();',
   '      $("preview").textContent = JSON.stringify(s, null, 2);',
   '      try { navigator.clipboard.writeText(JSON.stringify(s, null, 2)); } catch {}',
   '    });',
-  '    document.addEventListener("input", (e)=>{ const s = currentValues(); $("preview").textContent = JSON.stringify(s, null, 2); });',
-  '    loadDefaults();',
+  '    document.addEventListener("input", ()=>{ const s = currentValues(); $("preview").textContent = JSON.stringify(s, null, 2); });',
+  '    setValues(DEFAULTS); attachValidation();',
   '  </script>',
   '</body>',
   '</html>'
 ].join('\n');
+}
 
 router.get('/', (_req, res) => {
-  res.type('html').send(page);
+  const d = defaultsFromEnv();
+  const html = renderPage(JSON.stringify(d));
+  res.type('html').send(html);
 });
