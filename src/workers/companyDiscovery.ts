@@ -118,6 +118,16 @@ export default new Worker("company-discovery", async job => {
         });
       }
       const items = [...organic, ...peopleAlso, ...knowledge];
+      try {
+        const sample = organic.slice(0, 5).map((it: any) => ({ link: it.link || it.url, title: it.title || it.name, snippet: it.snippet || it.description }));
+        await logEvent(job.id as string, 'info', 'Serper fetch', {
+          q,
+          status: resp.status,
+          headers: { 'x-request-id': resp.headers['x-request-id'] || resp.headers['x-requestid'] || resp.headers['request-id'] || '' },
+          counts: { organic: organic.length, peopleAlsoSearch: peopleAlso.length, knowledgeGraph: knowledge.length },
+          sample
+        });
+      } catch {}
       const organicUrls = organic.map((it: any) => it.link || it.url || '').filter(Boolean);
       const peopleAlsoUrls = peopleAlso.map((it: any) => it.link || it.url || '').filter(Boolean);
       const knowledgeUrls = knowledge.map((it: any) => it.link || it.url || '').filter(Boolean);

@@ -14,15 +14,18 @@ const LLM_DEBUG_LOGS = (process.env.LLM_DEBUG_LOGS || "").toLowerCase() === 'tru
 const PERSON_SERPER_JITTER_MS = 900;
 const PERSON_LI_ACCEPT_THRESHOLD = Number(process.env.PERSON_LI_ACCEPT_THRESHOLD || 0.7);
 
-async function serperSearch(q: string) {
+async function serperSearch(q: string): Promise<{ status: number; headers: Record<string, string>; data: any }> {
   const res = await fetch("https://google.serper.dev/search", {
     method: "POST",
     headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
     body: JSON.stringify({ q, gl: "uk", hl: "en", autocorrect: true })
   });
+  const status = res.status;
+  const headers: Record<string, string> = {};
+  try { res.headers.forEach((v, k) => { headers[k] = v; }); } catch {}
   if (!res.ok) throw new Error(`Serper ${res.status}`);
-  // return res.json();
-  return (await res.json()) as any;
+  const data = await res.json();
+  return { status, headers, data };
 }
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
@@ -289,9 +292,21 @@ export default new Worker("person-linkedin", async job => {
     let processed = 0;
     const infoEvery = Math.max(1, Math.floor(totalQueries / 5));
     for (const q of [...personalQueries, ...companyQueries]) {
-      const data = await serperSearch(q);
+      const resp = await serperSearch(q);
       serperCalls += 1;
-      const organic = Array.isArray((data as any).organic) ? (data as any).organic : [];
+      const organic = Array.isArray((resp.data as any).organic) ? (resp.data as any).organic : [];
+      // Log Serper HTTP response meta + sample results
+      try {
+        const sample = organic.slice(0, 5).map((it: any) => ({ link: it.link, title: it.title, snippet: it.snippet }));
+        const hdr = resp.headers || {};
+        await logEvent(job.id as string, 'info', 'Serper fetch', {
+          query: q,
+          status: resp.status,
+          headers: { 'x-request-id': hdr['x-request-id'] || hdr['x-requestid'] || hdr['request-id'] || '' },
+          counts: { organic: organic.length },
+          sample
+        });
+      } catch {}
       // Log Serper raw results (trimmed) so we can assess query quality
       try {
         const sample = organic.slice(0, 5).map((it: any) => ({
