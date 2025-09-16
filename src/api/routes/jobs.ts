@@ -7,14 +7,22 @@ export const router = Router();
 router.post("/jobs/ch-appointments", async (req, res) => {
   // Accept payload from JSON body primarily; fall back to querystring for convenience
   const source: any = { ...(req.query || {}), ...(req.body || {}) };
-  const { companyNumber, firstName, lastName, contactId } = z
-    .object({
-      companyNumber: z.string().min(2),
-      firstName: z.string().min(1).optional(),
-      lastName: z.string().min(1).optional(),
-      contactId: z.string().min(3).optional(),
-    })
-    .parse(source);
+  // Treat empty strings as undefined for optional fields
+  const cleaned: any = { ...source };
+  ["firstName", "lastName", "contactId"].forEach(k => {
+    if (typeof cleaned[k] === 'string' && cleaned[k].trim() === '') delete cleaned[k];
+  });
+  const schema = z.object({
+    companyNumber: z.string().min(2),
+    firstName: z.string().min(1).optional(),
+    lastName: z.string().min(1).optional(),
+    contactId: z.string().min(3).optional(),
+  });
+  const parsed = schema.safeParse(cleaned);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_request', issues: parsed.error.issues });
+  }
+  const { companyNumber, firstName, lastName, contactId } = parsed.data;
 
   const jobId = `ch:${companyNumber}:${(firstName || "").toLowerCase()}:${(lastName || "").toLowerCase()}:${contactId || ""}`;
   await chQ.add(
