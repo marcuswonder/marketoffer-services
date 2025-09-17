@@ -21,6 +21,7 @@ type JobPayload = {
 
 const BEE_KEY = process.env.SCRAPINGBEE_API_KEY || "";
 const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
+const SERPER_API_KEY = process.env.SERPER_API_KEY || "";
 const BEE_MAX_PAGES = Number(process.env.SITEFETCH_BEE_MAX_PAGES || 1);
 const STATIC_TIMEOUT_MS = Number(process.env.SITEFETCH_STATIC_TIMEOUT_MS || 7000);
 const LLM_ONLY = (process.env.LLM_ONLY_WEBSITE_VALIDATION || "").toLowerCase() === 'true';
@@ -86,6 +87,20 @@ function extractBetween(html: string, re: RegExp): string[] {
     out.push((m[1] || "").trim());
   }
   return out;
+}
+
+async function serperSearch(q: string): Promise<{ status: number; headers: Record<string,string>; data: any }> {
+  if (!SERPER_API_KEY) return { status: 0, headers: {}, data: {} };
+  const res = await fetch("https://google.serper.dev/search", {
+    method: "POST",
+    headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ q, gl: "uk", hl: "en", autocorrect: true, num: 10 })
+  });
+  const status = res.status;
+  const headers: Record<string,string> = {};
+  try { res.headers.forEach((v,k)=>{ headers[k]=v; }); } catch {}
+  const data = status >= 200 && status < 400 ? await res.json() : {};
+  return { status, headers, data };
 }
 
 function stripTags(s: string): string {
@@ -493,6 +508,77 @@ export default new Worker("site-fetch", async job => {
         .slice(0)
         .sort((a, b) => legalWeight(b.url) - legalWeight(a.url));
       let used = 0;
+
+      // New step: If we have a company number, search Serper for pages on this host mentioning the CRN, fetch them via Bee first
+      if (targetNum && SERPER_API_KEY) {
+        try {
+          const q = `${targetNum} site:${host}`;
+          const resp = await serperSearch(q);
+          const organic = Array.isArray((resp.data as any)?.organic) ? (resp.data as any).organic : [];
+          const sample = organic.slice(0,5).map((it: any) => ({ link: it.link, title: it.title, snippet: it.snippet }));
+          await logEvent(job.id as string, 'info', 'Serper fetch (crn-site)', {
+            q,
+            status: resp.status,
+            headers: { 'x-request-id': resp.headers['x-request-id'] || resp.headers['x-requestid'] || resp.headers['request-id'] || '' },
+            counts: { organic: organic.length },
+            sample
+          });
+          const crnUrls = Array.from(new Set(organic.map((it: any) => String(it.link || '')).filter(u => u && baseHost(u) === host))).slice(0, Math.max(0, BEE_MAX_PAGES - used));
+          for (const u of crnUrls) {
+            if (used >= BEE_MAX_PAGES) break;
+            const r = await fetchBeeHtml(u, true, 3000, 'p span');
+            try {
+              await logEvent(job.id as string, 'info', 'Bee fetch (crn-site)', {
+                url: u,
+                status: r.status,
+                bytes: (r.html || '').length,
+                preferFull: true,
+                waitMs: 3000,
+                waitFor: 'p span',
+                snippet: stripTags(r.html || '').slice(0, 600)
+              });
+            } catch {}
+            if (r.status >= 200 && r.html.length >= 200) {
+              used++;
+              const sig = parseHtmlSignals(r.html);
+              for (const li of sig.linkedins) {
+                if (/linkedin\.com\/company\//i.test(li)) foundCompanyLIs.add(li);
+                if (/linkedin\.com\/in\//i.test(li)) foundPersonalLIs.add(li);
+              }
+              const nums = extractCompanyNumbers(sig.textChunk);
+              const pcs = Array.from(new Set((sig.textChunk.match(/[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/gi) || []).map(s => s.toUpperCase())));
+              pageEvidence.push({
+                url: u,
+                title: sig.title || '',
+                meta: sig.metaDesc || '',
+                h1: sig.h1s || [],
+                jsonld_org_name: (()=>{
+                  for (const j of sig.jsonld) {
+                    const t = (j && (j["@type"] || j["@type"])) || null;
+                    const types = Array.isArray(t) ? t : (t ? [t] : []);
+                    if (types.map(String).map(s=>s.toLowerCase()).includes("organization")) {
+                      const nm = String((j.name || j["legalName"] || ""));
+                      if (nm) return nm;
+                    }
+                  }
+                  return undefined;
+                })(),
+                company_numbers: nums,
+                postcodes: pcs,
+                emails: sig.emails || [],
+                linkedins: sig.linkedins || [],
+                text_snippet: stripTags(r.html).slice(0, SNIPPET_CHARS)
+              });
+              if (!LLM_ONLY) {
+                const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
+                await logEvent(job.id as string, 'debug', 'Scored bee page', { url: u, score, rationale, numbers_found: nums.length });
+                if (score > bestScore) { bestScore = score; bestRationale = `Bee: ${rationale}`; }
+              }
+            }
+            await new Promise(r => setTimeout(r, 200));
+          }
+        } catch {}
+      }
       for (const candidate of beeCandidates.slice(0, BEE_MAX_PAGES)) {
         const preferFull = legalWeight(candidate.url) >= 90;
         const waitMs = isLegal(candidate.url) ? 3000 : undefined;
