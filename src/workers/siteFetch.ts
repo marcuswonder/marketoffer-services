@@ -523,7 +523,13 @@ export default new Worker("site-fetch", async job => {
             counts: { organic: organic.length },
             sample
           });
-          const crnUrls = Array.from(new Set(organic.map((it: any) => String(it.link || '')).filter(u => u && baseHost(u) === host))).slice(0, Math.max(0, BEE_MAX_PAGES - used));
+          const crnUrls: string[] = Array.from(
+            new Set<string>(
+              (organic as any[])
+                .map((it: any) => String(it.link || ''))
+                .filter((u: string) => u && baseHost(u) === host)
+            )
+          ).slice(0, Math.max(0, BEE_MAX_PAGES - used));
           for (const u of crnUrls) {
             if (used >= BEE_MAX_PAGES) break;
             const r = await fetchBeeHtml(u, true, 3000, 'p span');
@@ -538,7 +544,7 @@ export default new Worker("site-fetch", async job => {
                 snippet: stripTags(r.html || '').slice(0, 600)
               });
             } catch {}
-            if (r.status >= 200 && r.html.length >= 200) {
+            if (r.status >= 200 && (r.html || '').length >= 200) {
               used++;
               const sig = parseHtmlSignals(r.html);
               for (const li of sig.linkedins) {
@@ -567,7 +573,7 @@ export default new Worker("site-fetch", async job => {
                 postcodes: pcs,
                 emails: sig.emails || [],
                 linkedins: sig.linkedins || [],
-                text_snippet: stripTags(r.html).slice(0, SNIPPET_CHARS)
+                text_snippet: stripTags(r.html || '').slice(0, SNIPPET_CHARS)
               });
               if (!LLM_ONLY) {
                 const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
