@@ -373,7 +373,12 @@ export default new Worker("site-fetch", async job => {
   const pageEvidence: Array<{ url: string; title: string; meta: string; h1: string[]; jsonld_org_name?: string; company_numbers: string[]; postcodes: string[]; emails: string[]; linkedins: string[]; text_snippet: string }>=[];
   let lastDecisionConfidence: number | null = null;
 
-    // First pass: cheap static fetch to avoid ScrapingBee credits on obvious 404/robots/generic pages
+    // First pass: cheap static fetch to avoid ScrapingBee credits on obvious 404/robots/soft-404 pages
+    const useStaticSignals = !BEE_KEY || BEE_MAX_PAGES <= 0; // if Bee unavailable, fall back to static signals
+    const isSoft404 = (html: string) => {
+      const t = stripTags(html || '').toLowerCase();
+      return /page not found|not found|404|doesn't exist|does not exist|we can't find|we cannot find|page cannot be found|oops/i.test(t);
+    };
     for (const url of urls) {
       const r = await fetchStaticHtml(url);
       // Log raw static fetch (status + size + short snippet) for diagnostics
@@ -386,15 +391,11 @@ export default new Worker("site-fetch", async job => {
           snippet: stripTags(r.html || '').slice(0, 600)
         });
       } catch {}
-      if (r.status >= 200 && r.status < 400 && r.html.length >= 200) {
+      if (r.status >= 200 && r.status < 400 && r.html.length >= 200 && !isSoft404(r.html)) {
         staticOk.push({ url, status: r.status, html: r.html });
-        const sig = parseHtmlSignals(r.html);
-        for (const li of sig.linkedins) {
-          if (/linkedin\.com\/company\//i.test(li)) foundCompanyLIs.add(li);
-          if (/linkedin\.com\/in\//i.test(li)) foundPersonalLIs.add(li);
-        }
-        // Early decision: if page explicitly declares a different company number, abort further checks for this host
-        const labeled = findLabeledCompanyNumber(sig.textChunk);
+        // Early decision: if page explicitly declares a different company number, abort further checks for this host (only when static content provides a labeled CRN)
+        const sigEarly = parseHtmlSignals(r.html);
+        const labeled = findLabeledCompanyNumber(sigEarly.textChunk);
         if (labeled) {
           if (targetNum && labeled !== targetNum) {
             abortHost = true;
@@ -411,36 +412,43 @@ export default new Worker("site-fetch", async job => {
             break;
           }
         }
-        // Build evidence per page
-        const nums = extractCompanyNumbers(sig.textChunk);
-        const pcs = Array.from(new Set((sig.textChunk.match(/[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/gi) || []).map(s => s.toUpperCase())));
-        const emails = sig.emails || [];
-        pageEvidence.push({
-          url,
-          title: sig.title || '',
-          meta: sig.metaDesc || '',
-          h1: sig.h1s || [],
-          jsonld_org_name: (()=>{
-            for (const j of sig.jsonld) {
-              const t = (j && (j["@type"] || j["@type"])) || null;
-              const types = Array.isArray(t) ? t : (t ? [t] : []);
-              if (types.map(String).map(s=>s.toLowerCase()).includes("organization")) {
-                const nm = String((j.name || j["legalName"] || ""));
-                if (nm) return nm;
+        // Only if Bee is not available, use static signals for evidence + scoring
+        if (useStaticSignals) {
+          const sig = sigEarly;
+          for (const li of sig.linkedins) {
+            if (/linkedin\.com\/company\//i.test(li)) foundCompanyLIs.add(li);
+            if (/linkedin\.com\/in\//i.test(li)) foundPersonalLIs.add(li);
+          }
+          const nums = extractCompanyNumbers(sig.textChunk);
+          const pcs = Array.from(new Set((sig.textChunk.match(/[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/gi) || []).map(s => s.toUpperCase())));
+          const emails = sig.emails || [];
+          pageEvidence.push({
+            url,
+            title: sig.title || '',
+            meta: sig.metaDesc || '',
+            h1: sig.h1s || [],
+            jsonld_org_name: (()=>{
+              for (const j of sig.jsonld) {
+                const t = (j && (j["@type"] || j["@type"])) || null;
+                const types = Array.isArray(t) ? t : (t ? [t] : []);
+                if (types.map(String).map(s=>s.toLowerCase()).includes("organization")) {
+                  const nm = String((j.name || j["legalName"] || ""));
+                  if (nm) return nm;
+                }
               }
-            }
-            return undefined;
-          })(),
-          company_numbers: nums,
-          postcodes: pcs,
-          emails,
-          linkedins: sig.linkedins || [],
-          text_snippet: stripTags(r.html).slice(0, SNIPPET_CHARS)
-        });
-        if (!LLM_ONLY) {
-          const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
-          await logEvent(job.id as string, 'debug', 'Scored static page', { url, status: r.status, score, rationale });
-          if (score > bestScore) { bestScore = score; bestRationale = rationale; }
+              return undefined;
+            })(),
+            company_numbers: nums,
+            postcodes: pcs,
+            emails,
+            linkedins: sig.linkedins || [],
+            text_snippet: stripTags(r.html).slice(0, SNIPPET_CHARS)
+          });
+          if (!LLM_ONLY) {
+            const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
+            await logEvent(job.id as string, 'debug', 'Scored static page', { url, status: r.status, score, rationale });
+            if (score > bestScore) { bestScore = score; bestRationale = rationale; }
+          }
         }
       }
       await new Promise(r => setTimeout(r, 250));
@@ -448,7 +456,7 @@ export default new Worker("site-fetch", async job => {
     }
 
   if (!staticOk.length) {
-      await logEvent(job.id as string, 'info', 'No static pages reachable; skipping Bee', { host });
+      await logEvent(job.id as string, 'info', 'No reachable pages; skipping Bee', { host });
     }
 
     // Optional escalation to ScrapingBee: only if static confidence is low and we have a reachable candidate
