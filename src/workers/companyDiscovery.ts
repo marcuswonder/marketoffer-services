@@ -366,11 +366,21 @@ Return strict JSON with both decision certainty and ownership likelihood:
             const companyNameForContext = (cnRows?.[0]?.company_name || '').toString();
 
             const pjId = `person:${(p as any).id}:${rootJobId}`;
-            await personQ.add('discover', {
+            const payload = {
               person: { firstName: p.first_name || '', middleNames: p.middle_names || '', lastName: p.last_name || '', dob: p.dob_string || '' },
               context: { companyName: companyNameForContext, websites: aggWebsites, companyLinkedIns: aggCompanyLIs, personalLinkedIns: aggPersonalLIs },
               rootJobId
-            }, { jobId: pjId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
+            };
+            try {
+              await query(
+                `INSERT INTO job_progress(job_id, queue, name, status, data)
+                 VALUES ($1,'person-linkedin','discover','pending',$2)
+                 ON CONFLICT (job_id)
+                 DO UPDATE SET status='pending', data=$2, updated_at=now()`,
+                [pjId, JSON.stringify(payload)]
+              );
+            } catch {}
+            await personQ.add('discover', payload, { jobId: pjId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
             enq++;
           }
           await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after ALL discovery complete (no site-fetch jobs)', { rootJobId, people: people.length, enqueued: enq });

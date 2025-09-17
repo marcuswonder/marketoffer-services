@@ -840,25 +840,31 @@ export default new Worker("site-fetch", async job => {
             const companyNameForContext = (cnRows?.[0]?.company_name || '').toString();
 
             const pjId = `person:${(p as any).id}:${root}`;
-            await personQ.add(
-              'discover',
-              {
-                person: {
-                  firstName: p.first_name || '',
-                  middleNames: p.middle_names || '',
-                  lastName: p.last_name || '',
-                  dob: p.dob_string || ''
-                },
-                context: {
-                  companyName: companyNameForContext,
-                  websites: aggWebsites,
-                  companyLinkedIns: aggCompanyLIs,
-                  personalLinkedIns: aggPersonalLIs
-                },
-                rootJobId: root
+            const payload = {
+              person: {
+                firstName: p.first_name || '',
+                middleNames: p.middle_names || '',
+                lastName: p.last_name || '',
+                dob: p.dob_string || ''
               },
-              { jobId: pjId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } }
-            );
+              context: {
+                companyName: companyNameForContext,
+                websites: aggWebsites,
+                companyLinkedIns: aggCompanyLIs,
+                personalLinkedIns: aggPersonalLIs
+              },
+              rootJobId: root
+            };
+            try {
+              await query(
+                `INSERT INTO job_progress(job_id, queue, name, status, data)
+                 VALUES ($1,'person-linkedin','discover','pending',$2)
+                 ON CONFLICT (job_id)
+                 DO UPDATE SET status='pending', data=$2, updated_at=now()`,
+                [pjId, JSON.stringify(payload)]
+              );
+            } catch {}
+            await personQ.add('discover', payload, { jobId: pjId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
             enqueued++;
           }
           await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after ALL discovery complete', { scope: 'summary', rootJobId: root, people: people.length, enqueued });

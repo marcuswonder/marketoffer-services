@@ -77,10 +77,16 @@ const page = [
   '      data.items.forEach(it => {',
   '        const r = it.root; const id = it.rootJobId;',
   '        const comp = it.discovery.company; const site = it.discovery.sitefetch; const person = it.person;',
+  '        const fn = (r && r.data && r.data.firstName) ? String(r.data.firstName) : "";',
+  '        const ln = (r && r.data && r.data.lastName) ? String(r.data.lastName) : "";',
+  '        const cn = (r && r.data && r.data.companyNumber) ? String(r.data.companyNumber) : "";',
+  '        const friendly = (fn + " " + ln).trim() + (cn ? (" \u2013 " + cn) : "");',
+  '        const stage = (function(){ const c=(o)=> (o?((o.running||0)+(o.pending||0)):0); if(c(it.discovery.company)>0) return "Discovering companies"; if(c(it.discovery.sitefetch)>0) return "Fetching site data"; if(c(it.person)>0) return "Searching LinkedIn"; const st=String(r.status||"").toLowerCase(); if(st==="completed") return "Completed"; if(st==="failed") return "Failed"; if(st==="running") return "In progress"; return "Queued"; })();',
   '        const div = el(`\n'+
   '          <div class="item" data-id="${id}">\n'+
+  '            <div style="font-weight:600;">${friendly || "(No name)"}</div>\n'+
   '            <div class="id">${id}</div>\n'+
-  '            <div>${r.status.toUpperCase()} • ${r.name} • ${fmtTs(r.updated_at)}</div>\n'+
+  '            <div>${stage} • ${fmtTs(r.updated_at)}</div>\n'+
   '            <div class="row">\n'+
   '              <span class="badge">company: ${comp.completed || 0}/${comp.total || 0}</span>\n'+
   '              <span class="badge">site: ${site.completed || 0}/${site.total || 0}</span>\n'+
