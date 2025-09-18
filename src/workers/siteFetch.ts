@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
 import { connection } from "../queues/index.js";
-import { personQ } from "../queues/index.js";
+import { personQ, siteFetchQ } from "../queues/index.js";
 import { initDb, startJob, logEvent, completeJob, failJob } from "../lib/progress.js";
 import { logger } from "../lib/logger.js";
 import { fetch } from "undici";
@@ -764,6 +764,31 @@ export default new Worker("site-fetch", async job => {
       website_validations,
       linkedins: Array.from(new Set([...foundCompanyLIs, ...foundPersonalLIs])).slice(0, 50)
     });
+
+    // If we have an absolute match (LLM confidence == 1 or deterministic CRN match), cancel other pending site-fetch jobs under this workflow to save credits
+    try {
+      const root = (job.data as any)?.rootJobId || null;
+      const absolute = (validated_websites.length > 0) && ((lastDecisionConfidence != null && lastDecisionConfidence >= 1) || /Deterministic: company number match/i.test(bestRationale));
+      if (root && absolute) {
+        const { rows: pend } = await query<{ job_id: string }>(
+          `SELECT job_id FROM job_progress
+             WHERE queue = 'site-fetch' AND status = 'pending' AND data->>'rootJobId' = $1 AND job_id <> $2`,
+          [root, job.id as string]
+        );
+        let cancelled = 0;
+        for (const row of pend) {
+          try { await siteFetchQ.remove(row.job_id); } catch {}
+          try {
+            await query(`UPDATE job_progress SET status='cancelled', data = COALESCE(data,'{}'::jsonb) || $2::jsonb, updated_at=now() WHERE job_id=$1`,
+              [row.job_id, JSON.stringify({ cancelled: true, reason: 'absolute_match', winner: host })]);
+          } catch {}
+          cancelled++;
+        }
+        if (cancelled) {
+          await logEvent(job.id as string, 'info', 'Cancelled pending site-fetch jobs due to confident match', { rootJobId: root, cancelled, winner: host });
+        }
+      }
+    } catch {}
 
     await completeJob(job.id as string, {
       companyNumber,
