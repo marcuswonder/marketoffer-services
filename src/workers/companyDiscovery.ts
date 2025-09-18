@@ -74,6 +74,10 @@ export default new Worker("company-discovery", async job => {
     for (const kp of keyPhrases.slice(0, 5)) append(`${cleaned} ${kp} UK`);
     if (postcode) append(`${cleaned} ${postcode} UK`);
     if (address) append(`${cleaned} ${String(address).split(',')[0]} UK`);
+    // Additional targeted queries to find legal pages
+    if (companyName) append(`${companyName} "Registered Address"`);
+    if (cleaned) append(`${cleaned} "Registered Address"`);
+    if (cleaned) append(`${cleaned} "Company Number"`);
     await logEvent(job.id as string, 'info', 'Built queries', { queries, sicCodes, keyPhrases, directorNames });
 
     const hosts = new Set<string>();
