@@ -66,18 +66,59 @@ export default new Worker("company-discovery", async job => {
     const directorNames = dirRows.rows.map(r => r.full_name).filter(Boolean);
 
     // Build queries per instructions
+    const safeCompanyName = typeof companyName === 'string' ? companyName.trim() : '';
+    const safeCleanName = cleaned.trim();
+    const safeCompanyNumber = typeof companyNumber === 'string' ? companyNumber.trim() : '';
+    const safePostcode = typeof postcode === 'string' ? postcode.trim() : '';
+    const rawAddress = typeof address === 'string' ? address : '';
+    const normalizedAddress = rawAddress.replace(/\s+/g, ' ').trim();
+    const addressLine = normalizedAddress ? normalizedAddress.split(',')[0]?.trim() || '' : '';
+
     const queries: string[] = [];
-    const append = (q: string) => { if (q && q.trim()) queries.push(q.trim()); };
-    append(`${companyName} UK`);
-    for (const kp of keyPhrases.slice(0, 5)) append(`${companyName} ${kp} UK`);
-    append(`${cleaned} UK`);
-    for (const kp of keyPhrases.slice(0, 5)) append(`${cleaned} ${kp} UK`);
-    if (postcode) append(`${cleaned} ${postcode} UK`);
-    if (address) append(`${cleaned} ${String(address).split(',')[0]} UK`);
-    // Additional targeted queries to find legal pages
-    if (companyName) append(`${companyName} "Registered Address"`);
-    if (cleaned) append(`${cleaned} "Registered Address"`);
-    if (cleaned) append(`${cleaned} "Company Number"`);
+    const seenQueries = new Set<string>();
+    const append = (q: string) => {
+      if (!q) return;
+      const trimmed = q.trim();
+      if (!trimmed || seenQueries.has(trimmed)) return;
+      seenQueries.add(trimmed);
+      queries.push(trimmed);
+    };
+
+    if (safeCompanyName) append(`${safeCompanyName} UK`);
+    if (safeCleanName) append(`${safeCleanName} UK`);
+
+    if (safeCompanyNumber) {
+      if (safeCompanyName) {
+        append(`${safeCompanyName} ${safeCompanyNumber} UK`);
+        append(`${safeCompanyName} "${safeCompanyNumber}"`);
+      }
+      if (safeCleanName) {
+        append(`${safeCleanName} ${safeCompanyNumber} UK`);
+        append(`${safeCleanName} "${safeCompanyNumber}"`);
+      }
+      if (!safeCompanyName && !safeCleanName) append(`${safeCompanyNumber} UK`);
+    }
+
+    if (safePostcode) {
+      if (safeCleanName) append(`${safeCleanName} ${safePostcode} UK`);
+      if (safeCompanyName) append(`${safeCompanyName} ${safePostcode} UK`);
+    }
+
+    if (addressLine) {
+      if (safeCleanName) append(`${safeCleanName} ${addressLine} UK`);
+      if (safeCompanyName) append(`${safeCompanyName} ${addressLine} UK`);
+      if (safeCompanyName) append(`${safeCompanyName} "${addressLine}" UK`);
+      if (safeCleanName) append(`${safeCleanName} "${addressLine}" UK`);
+    }
+    if (normalizedAddress && normalizedAddress !== addressLine) {
+      if (safeCompanyName) append(`${safeCompanyName} "${normalizedAddress}" UK`);
+      if (safeCleanName) append(`${safeCleanName} "${normalizedAddress}" UK`);
+    }
+
+    for (const kp of keyPhrases.slice(0, 5)) {
+      if (safeCompanyName) append(`${safeCompanyName} ${kp} UK`);
+      if (safeCleanName) append(`${safeCleanName} ${kp} UK`);
+    }
     await logEvent(job.id as string, 'info', 'Built queries', { queries, sicCodes, keyPhrases, directorNames });
 
     const hosts = new Set<string>();

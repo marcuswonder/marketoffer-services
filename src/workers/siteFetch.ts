@@ -384,9 +384,10 @@ export default new Worker("site-fetch", async job => {
     const staticOk: Array<{ url: string; status: number; html: string }> = [];
     const targetNum = (companyNumber || "").toUpperCase();
     let abortHost = false;
-  let earlyAccepted = false;
-  const pageEvidence: Array<{ url: string; title: string; meta: string; h1: string[]; jsonld_org_name?: string; company_numbers: string[]; postcodes: string[]; emails: string[]; linkedins: string[]; text_snippet: string }>=[];
-  let lastDecisionConfidence: number | null = null;
+    let earlyAccepted = false;
+    const pageEvidence: Array<{ url: string; title: string; meta: string; h1: string[]; jsonld_org_name?: string; company_numbers: string[]; postcodes: string[]; emails: string[]; linkedins: string[]; text_snippet: string }> = [];
+    let lastDecisionConfidence: number | null = null;
+    let tradingName: string | null = null;
 
     // First pass: cheap static fetch to avoid ScrapingBee credits on obvious 404/robots/soft-404 pages
     const useStaticSignals = !BEE_KEY || BEE_MAX_PAGES <= 0; // if Bee unavailable, fall back to static signals
@@ -734,6 +735,9 @@ export default new Worker("site-fetch", async job => {
         bestScore = decision.company_relevance;
         bestRationale = `LLM: ${decision.rationale}`;
         lastDecisionConfidence = typeof decision.decision_confidence === 'number' ? decision.decision_confidence : null;
+        if (typeof decision.trading_name === 'string' && decision.trading_name.trim()) {
+          tradingName = decision.trading_name.trim();
+        }
         for (const li of decision.linkedins || []) {
           if (/linkedin\.com\/company\//i.test(li)) foundCompanyLIs.add(li);
           if (/linkedin\.com\/in\//i.test(li)) foundPersonalLIs.add(li);
@@ -742,28 +746,32 @@ export default new Worker("site-fetch", async job => {
     }
 
     const validated_websites = bestScore >= ACCEPT_THRESHOLD ? [host] : [];
-    const website_validations = [
-      {
-        url: host,
-        company_relevance: Number(bestScore.toFixed(3)),
-        decision_confidence: (lastDecisionConfidence != null ? Number(lastDecisionConfidence.toFixed(3)) : undefined),
-        decision_rationale: bestRationale
-      }
-    ];
+    const validationEntry: any = {
+      url: host,
+      company_relevance: Number(bestScore.toFixed(3)),
+      decision_confidence: (lastDecisionConfidence != null ? Number(lastDecisionConfidence.toFixed(3)) : undefined),
+      decision_rationale: bestRationale
+    };
+    if (tradingName) {
+      validationEntry.trading_name = tradingName;
+    }
+    const website_validations = [validationEntry];
 
     // If we used LLM decision last, try to enrich the validation record with its decision_confidence (best effort)
     // Note: This keeps existing structure minimal while capturing both signals when available.
     // We set the field on the first (and only) validation entry.
     // (Non-LLM paths will simply leave decision_confidence undefined.)
 
-    await logEvent(job.id as string, 'info', 'SiteFetch results', {
+    const siteFetchLog: any = {
       scope: 'summary',
       host,
       score: bestScore,
       validated_websites,
       website_validations,
       linkedins: Array.from(new Set([...foundCompanyLIs, ...foundPersonalLIs])).slice(0, 50)
-    });
+    };
+    if (tradingName) siteFetchLog.trading_name = tradingName;
+    await logEvent(job.id as string, 'info', 'SiteFetch results', siteFetchLog);
 
     // If we have an absolute match (LLM confidence == 1 or deterministic CRN match), cancel other pending site-fetch jobs under this workflow to save credits
     try {
@@ -797,6 +805,7 @@ export default new Worker("site-fetch", async job => {
       validated_websites,
       website_validations,
       linkedins: Array.from(new Set([...foundCompanyLIs, ...foundPersonalLIs])),
+      trading_name: tradingName || null,
       rootJobId: (job.data as any)?.rootJobId || null
     });
     try { await logEvent(job.id as string, 'info', 'Usage summary', { scrapingbee_calls: beeCalls }); } catch {}
@@ -838,19 +847,23 @@ export default new Worker("site-fetch", async job => {
                            )
                            ELSE $3::jsonb
                       END
-             ),
-             verified_director_linkedIns = (
-               SELECT CASE WHEN jsonb_typeof(COALESCE(verified_director_linkedIns, '[]'::jsonb)) = 'array'
-                           THEN (
-                             SELECT jsonb_agg(DISTINCT j.value)
-                               FROM jsonb_array_elements(COALESCE(verified_director_linkedIns, '[]'::jsonb) || $4::jsonb) AS j(value)
-                           )
-                           ELSE $4::jsonb
-                      END
-             ),
-             updated_at = now()
-         WHERE company_number = $5`,
-        [addWebsites, addVerifications, addCompanyLIs, addPersonalLIs, companyNumber]
+            ),
+            verified_director_linkedIns = (
+              SELECT CASE WHEN jsonb_typeof(COALESCE(verified_director_linkedIns, '[]'::jsonb)) = 'array'
+                          THEN (
+                            SELECT jsonb_agg(DISTINCT j.value)
+                              FROM jsonb_array_elements(COALESCE(verified_director_linkedIns, '[]'::jsonb) || $4::jsonb) AS j(value)
+                          )
+                          ELSE $4::jsonb
+                     END
+            ),
+            trading_name = CASE
+              WHEN COALESCE($6::text, '') <> '' THEN $6::text
+              ELSE trading_name
+            END,
+            updated_at = now()
+        WHERE company_number = $5`,
+        [addWebsites, addVerifications, addCompanyLIs, addPersonalLIs, companyNumber, tradingName]
       );
       await logEvent(job.id as string, 'info', 'Updated ch_appointments with siteFetch results', {
         scope: 'summary',
@@ -860,6 +873,48 @@ export default new Worker("site-fetch", async job => {
         personal_linkedins_added: persistLIs ? Array.from(foundPersonalLIs).length : 0,
         linkedins_persisted: persistLIs
       });
+      if (tradingName) {
+        const root = (job.data as any)?.rootJobId || null;
+        if (root) {
+          try {
+            const { rows: rootRows } = await query<{ data: any }>(
+              `SELECT data FROM job_progress WHERE job_id = $1 LIMIT 1`,
+              [root]
+            );
+            const rootData = rootRows?.[0]?.data;
+            if (rootData && typeof rootData === 'object') {
+              let changed = false;
+              const enriched = Array.isArray((rootData as any).enriched) ? (rootData as any).enriched : [];
+              for (const person of enriched) {
+                if (!person || typeof person !== 'object') continue;
+                const appointments = Array.isArray((person as any).appointments) ? (person as any).appointments : [];
+                for (const appt of appointments) {
+                  if (!appt || typeof appt !== 'object') continue;
+                  const num = (appt.company_number || appt.companyNumber || '').toString();
+                  if (num === companyNumber && (appt.trading_name || '') !== tradingName) {
+                    appt.trading_name = tradingName;
+                    changed = true;
+                  }
+                }
+              }
+              if (changed) {
+                await query(
+                  `UPDATE job_progress SET data = $2, updated_at = now() WHERE job_id = $1`,
+                  [root, JSON.stringify(rootData)]
+                );
+                await logEvent(root, 'info', 'Updated trading name from siteFetch', { companyNumber, trading_name: tradingName });
+              }
+            }
+          } catch (e) {
+            await logEvent(job.id as string, 'warn', 'Failed to merge trading name into root job progress', {
+              error: String(e),
+              rootJobId: root,
+              companyNumber,
+              trading_name: tradingName
+            });
+          }
+        }
+      }
     } catch (e) {
       await logEvent(job.id as string, 'error', 'Failed to update ch_appointments with siteFetch results', { error: String(e), companyNumber });
     }
@@ -935,26 +990,65 @@ export default new Worker("site-fetch", async job => {
                   FROM ch_appointments a,
                        LATERAL jsonb_array_elements(COALESCE(a.verified_director_linkedIns, '[]'::jsonb)) AS j(value)
                  WHERE a.person_id = $1
+              ),
+              tn AS (
+                SELECT to_jsonb(TRIM(a.trading_name)) AS v
+                  FROM ch_appointments a
+                 WHERE a.person_id = $1 AND COALESCE(a.trading_name, '') <> ''
               )
               SELECT
                 COALESCE((SELECT jsonb_agg(DISTINCT v) FROM w), '[]'::jsonb) AS websites,
                 COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lc), '[]'::jsonb) AS company_linkedins,
-                COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lp), '[]'::jsonb) AS personal_linkedins`;
+                COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lp), '[]'::jsonb) AS personal_linkedins,
+                COALESCE((SELECT jsonb_agg(DISTINCT v) FROM tn), '[]'::jsonb) AS trading_names`;
             const { rows: aggRows } = await query<any>(aggSql, [Number((p as any).id)]);
             const aggWebsites: string[] = Array.isArray(aggRows?.[0]?.websites) ? aggRows[0].websites : [];
             const aggCompanyLIs: string[] = Array.isArray(aggRows?.[0]?.company_linkedins) ? aggRows[0].company_linkedins : [];
             const aggPersonalLIs: string[] = Array.isArray(aggRows?.[0]?.personal_linkedins) ? aggRows[0].personal_linkedins : [];
+            const aggTradingNames: string[] = Array.isArray(aggRows?.[0]?.trading_names)
+              ? Array.from(new Set((aggRows[0].trading_names as any[]).map(v => (v ?? '').toString().trim()).filter(Boolean)))
+              : [];
 
-            // Representative company name for this person (latest updated)
-            const { rows: cnRows } = await query<{ company_name: string }>(
-              `SELECT company_name
-                 FROM ch_appointments a
-                WHERE a.person_id = $1 AND COALESCE(company_name,'') <> ''
-                ORDER BY updated_at DESC
-                LIMIT 1`,
+            const { rows: companyRows } = await query<{ company_name: string | null; company_status: string | null; trading_name: string | null }>(
+              `SELECT company_name, company_status, trading_name
+                 FROM ch_appointments
+                WHERE person_id = $1`,
               [Number((p as any).id)]
             );
-            const companyNameForContext = (cnRows?.[0]?.company_name || '').toString();
+            const allTradingSet = new Set<string>(aggTradingNames);
+            const activeTradingSet = new Set<string>();
+            const allRegisteredSet = new Set<string>();
+            const activeRegisteredSet = new Set<string>();
+            for (const row of companyRows) {
+              const status = (row.company_status || '').toString().trim().toLowerCase();
+              const isActive = status === 'active';
+              const registered = (row.company_name || '').toString().trim();
+              if (registered) {
+                allRegisteredSet.add(registered);
+                if (isActive) activeRegisteredSet.add(registered);
+              }
+              const tname = (row.trading_name || '').toString().trim();
+              if (tname) {
+                allTradingSet.add(tname);
+                if (isActive) activeTradingSet.add(tname);
+              }
+            }
+            const allTradingNames = Array.from(allTradingSet);
+            const activeTradingNames = Array.from(activeTradingSet);
+            const allRegisteredNames = Array.from(allRegisteredSet);
+            const activeRegisteredNames = Array.from(activeRegisteredSet);
+
+            const companyNameForContext = (() => {
+              const activeTrading = companyRows.find(r => (r.company_status || '').toString().trim().toLowerCase() === 'active' && (r.trading_name || '').toString().trim());
+              if (activeTrading) return activeTrading.trading_name!.toString().trim();
+              const activeRegistered = companyRows.find(r => (r.company_status || '').toString().trim().toLowerCase() === 'active' && (r.company_name || '').toString().trim());
+              if (activeRegistered) return activeRegistered.company_name!.toString().trim();
+              const anyTrading = companyRows.find(r => (r.trading_name || '').toString().trim());
+              if (anyTrading) return anyTrading.trading_name!.toString().trim();
+              const anyRegistered = companyRows.find(r => (r.company_name || '').toString().trim());
+              if (anyRegistered) return anyRegistered.company_name!.toString().trim();
+              return '';
+            })();
 
             const pjId = `person:${(p as any).id}:${root}`;
             const payload = {
@@ -966,6 +1060,10 @@ export default new Worker("site-fetch", async job => {
               },
               context: {
                 companyName: companyNameForContext,
+                tradingNames: allTradingNames,
+                activeTradingNames,
+                registeredNames: allRegisteredNames,
+                activeRegisteredNames,
                 websites: aggWebsites,
                 companyLinkedIns: aggCompanyLIs,
                 personalLinkedIns: aggPersonalLIs
@@ -1016,15 +1114,24 @@ export default new Worker("site-fetch", async job => {
                 FROM ch_appointments,
                      LATERAL jsonb_array_elements(COALESCE(verified_director_linkedIns, '[]'::jsonb)) AS j(value)
                WHERE company_number = $1
+            ),
+            tn AS (
+              SELECT to_jsonb(TRIM(trading_name)) AS v
+                FROM ch_appointments
+               WHERE company_number = $1 AND COALESCE(trading_name, '') <> ''
             )
             SELECT
               COALESCE((SELECT jsonb_agg(DISTINCT v) FROM w), '[]'::jsonb) AS websites,
               COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lc), '[]'::jsonb) AS company_linkedins,
-              COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lp), '[]'::jsonb) AS personal_linkedins`;
+              COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lp), '[]'::jsonb) AS personal_linkedins,
+              COALESCE((SELECT jsonb_agg(DISTINCT v) FROM tn), '[]'::jsonb) AS trading_names`;
           const { rows: aggRows } = await query<any>(aggSql, [companyNumber]);
           const aggWebsites: string[] = Array.isArray(aggRows?.[0]?.websites) ? aggRows[0].websites : [];
           const aggCompanyLIs: string[] = Array.isArray(aggRows?.[0]?.company_linkedins) ? aggRows[0].company_linkedins : [];
           const aggPersonalLIs: string[] = Array.isArray(aggRows?.[0]?.personal_linkedins) ? aggRows[0].personal_linkedins : [];
+          const aggTradingNames: string[] = Array.isArray(aggRows?.[0]?.trading_names)
+            ? Array.from(new Set((aggRows[0].trading_names as any[]).map(v => (v ?? '').toString().trim()).filter(Boolean)))
+            : [];
 
           const { rows: people } = await query<{ id: number; first_name: string | null; middle_names: string | null; last_name: string | null; dob_string: string | null }>(
             `SELECT DISTINCT p.id, p.first_name, p.middle_names, p.last_name, p.dob_string
@@ -1033,15 +1140,45 @@ export default new Worker("site-fetch", async job => {
               WHERE a.company_number = $1`,
             [companyNumber]
           );
-          const { rows: cnRows } = await query<{ company_name: string }>(
-            `SELECT company_name
+          const { rows: nameRows } = await query<{ company_name: string | null; trading_name: string | null; company_status: string | null }>(
+            `SELECT company_name, trading_name, company_status
                FROM ch_appointments
-              WHERE company_number = $1 AND COALESCE(company_name,'') <> ''
-              ORDER BY updated_at DESC
-              LIMIT 1`,
+              WHERE company_number = $1`,
             [companyNumber]
           );
-          const companyNameForContext = (cnRows?.[0]?.company_name || '').toString();
+          const allRegisteredSet = new Set<string>();
+          const activeRegisteredSet = new Set<string>();
+          const allTradingSet = new Set<string>(aggTradingNames);
+          const activeTradingSet = new Set<string>();
+          for (const row of nameRows) {
+            const status = (row.company_status || '').toString().trim().toLowerCase();
+            const isActive = status === 'active';
+            const reg = (row.company_name || '').toString().trim();
+            if (reg) {
+              allRegisteredSet.add(reg);
+              if (isActive) activeRegisteredSet.add(reg);
+            }
+            const tname = (row.trading_name || '').toString().trim();
+            if (tname) {
+              allTradingSet.add(tname);
+              if (isActive) activeTradingSet.add(tname);
+            }
+          }
+          const allRegisteredNames = Array.from(allRegisteredSet);
+          const activeRegisteredNames = Array.from(activeRegisteredSet);
+          const allTradingNames = Array.from(allTradingSet);
+          const activeTradingNames = Array.from(activeTradingSet);
+          const companyNameForContext = (() => {
+            const activeTrading = nameRows.find(r => (r.company_status || '').toString().trim().toLowerCase() === 'active' && (r.trading_name || '').toString().trim());
+            if (activeTrading) return activeTrading.trading_name!.toString().trim();
+            const activeRegistered = nameRows.find(r => (r.company_status || '').toString().trim().toLowerCase() === 'active' && (r.company_name || '').toString().trim());
+            if (activeRegistered) return activeRegistered.company_name!.toString().trim();
+            const anyTrading = nameRows.find(r => (r.trading_name || '').toString().trim());
+            if (anyTrading) return anyTrading.trading_name!.toString().trim();
+            const anyRegistered = nameRows.find(r => (r.company_name || '').toString().trim());
+            if (anyRegistered) return anyRegistered.company_name!.toString().trim();
+            return '';
+          })();
 
           let enqueued = 0;
           for (const p of people) {
@@ -1060,6 +1197,10 @@ export default new Worker("site-fetch", async job => {
                 context: {
                   companyNumber,
                   companyName: companyNameForContext,
+                  tradingNames: allTradingNames,
+                  activeTradingNames,
+                  registeredNames: allRegisteredNames,
+                  activeRegisteredNames,
                   websites: aggWebsites,
                   companyLinkedIns: aggCompanyLIs,
                   personalLinkedIns: aggPersonalLIs

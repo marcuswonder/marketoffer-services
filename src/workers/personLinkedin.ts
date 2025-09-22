@@ -53,6 +53,22 @@ function hostLabel(h: string): string {
   return core.replace(/[-_]+/g, ' ').trim();
 }
 
+function dedupeStrings(values: any[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of values || []) {
+    if (v == null) continue;
+    const str = typeof v === 'string' ? v : String(v);
+    const trimmed = str.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
 async function scorePersonalCandidate(opts: {
   fullName: string;
   dob?: string;
@@ -171,7 +187,17 @@ await initDb();
 type PersonSearchPayload = {
   personId?: string;
   person?: { firstName: string; middleNames?: string; lastName: string; dob?: string };
-  context?: { companyNumber?: string; companyName?: string; websites?: string[]; companyLinkedIns?: string[]; personalLinkedIns?: string[] };
+  context?: {
+    companyNumber?: string;
+    companyName?: string;
+    tradingNames?: string[];
+    activeTradingNames?: string[];
+    registeredNames?: string[];
+    activeRegisteredNames?: string[];
+    websites?: string[];
+    companyLinkedIns?: string[];
+    personalLinkedIns?: string[];
+  };
   rootJobId?: string;
 };
 
@@ -218,30 +244,55 @@ export default new Worker("person-linkedin", async job => {
     // Build query seeds
     const websites: string[] = Array.isArray(context?.websites) ? (context!.websites as string[]) : [];
     const siteHosts = Array.from(new Set(websites.map(w => (w || '').toString().replace(/^https?:\/\//i, '').replace(/\/$/, '')))).filter(Boolean);
-    const tradingNames = Array.from(new Set(siteHosts.map(h => hostLabel(h)))).filter(Boolean);
-    const companyNameCtx: string = (context?.companyName || '').toString();
-    const companyNames = Array.from(new Set([companyNameCtx, ...tradingNames])).filter(Boolean);
+    const hostTradingNames = dedupeStrings(siteHosts.map(h => hostLabel(h)).filter(Boolean));
+    const tradingNamesAll = dedupeStrings([
+      ...(Array.isArray(context?.tradingNames) ? context!.tradingNames as any[] : []),
+      ...hostTradingNames
+    ]);
+    const tradingNamesActive = dedupeStrings(Array.isArray(context?.activeTradingNames) ? context!.activeTradingNames as any[] : []);
+    const registeredNamesAll = dedupeStrings([
+      ...(Array.isArray(context?.registeredNames) ? context!.registeredNames as any[] : []),
+      context?.companyName || ''
+    ]);
+    const registeredNamesActive = dedupeStrings(Array.isArray(context?.activeRegisteredNames) ? context!.activeRegisteredNames as any[] : []);
+    const companyNameCtx: string = (context?.companyName || '').toString().trim();
+    const companyNames = Array.from(new Set([companyNameCtx, ...registeredNamesAll, ...tradingNamesAll])).filter(Boolean);
     const personalSeeds: string[] = Array.isArray(context?.personalLinkedIns) ? (context!.personalLinkedIns as string[]) : [];
     const companySeeds: string[] = Array.isArray(context?.companyLinkedIns) ? (context!.companyLinkedIns as string[]) : [];
 
     const personalQueries: string[] = [];
     const companyQueries: string[] = [];
+    const addPersonalQuery = (base: string, tokens: string[] = []) => {
+      if (!base.trim()) return;
+      const parts = [base.trim(), ...tokens].filter(Boolean);
+      const query = `${parts.join(' ')} UK site:linkedin.com/in`;
+      personalQueries.push(query.replace(/\s+/g, ' ').trim());
+    };
+
+    const tradingActiveQuoted = tradingNamesActive.map(n => `"${n}"`);
+    const registeredAllQuoted = registeredNamesAll.map(n => `"${n}"`);
+    const tradingActiveLower = new Set(tradingNamesActive.map(n => n.toLowerCase()));
+    const inactiveTradingNames = tradingNamesAll.filter(t => !tradingActiveLower.has(t.toLowerCase()))
+      .map(n => `"${n}"`);
+
     if (fullName.trim()) {
-      personalQueries.push(`${fullName} UK site:linkedin.com/in`);
-      if (dob) personalQueries.push(`${fullName} ${dob} site:linkedin.com/in`);
-      if (tradingNames.length) personalQueries.push(`${fullName} ${tradingNames.join(' ')} UK site:linkedin.com/in`);
-      if (companyNames.length) personalQueries.push(`${fullName} ${companyNames.join(' ')} UK site:linkedin.com/in`);
-      for (const t of tradingNames) personalQueries.push(`${fullName} ${t} UK site:linkedin.com/in`);
-      for (const c of companyNames) personalQueries.push(`${fullName} ${c} UK site:linkedin.com/in`);
+      addPersonalQuery(fullName);
+      if (dob) addPersonalQuery(fullName, [dob]);
+      if (tradingNamesActive.length > 1) addPersonalQuery(fullName, tradingActiveQuoted);
+      for (const t of tradingNamesActive) addPersonalQuery(fullName, [`"${t}"`]);
+      for (const t of inactiveTradingNames) addPersonalQuery(fullName, [t]);
+      for (const c of registeredAllQuoted) addPersonalQuery(fullName, [c]);
+      if (companyNames.length) addPersonalQuery(fullName, companyNames.map(c => `"${c}"`));
     }
     // Also run searches excluding middle names (first + last only)
     if (shortName && shortName !== fullName) {
-      personalQueries.push(`${shortName} UK site:linkedin.com/in`);
-      if (dob) personalQueries.push(`${shortName} ${dob} site:linkedin.com/in`);
-      if (tradingNames.length) personalQueries.push(`${shortName} ${tradingNames.join(' ')} UK site:linkedin.com/in`);
-      if (companyNames.length) personalQueries.push(`${shortName} ${companyNames.join(' ')} UK site:linkedin.com/in`);
-      for (const t of tradingNames) personalQueries.push(`${shortName} ${t} UK site:linkedin.com/in`);
-      for (const c of companyNames) personalQueries.push(`${shortName} ${c} UK site:linkedin.com/in`);
+      addPersonalQuery(shortName);
+      if (dob) addPersonalQuery(shortName, [dob]);
+      if (tradingNamesActive.length > 1) addPersonalQuery(shortName, tradingActiveQuoted);
+      for (const t of tradingNamesActive) addPersonalQuery(shortName, [`"${t}"`]);
+      for (const t of inactiveTradingNames) addPersonalQuery(shortName, [t]);
+      for (const c of registeredAllQuoted) addPersonalQuery(shortName, [c]);
+      if (companyNames.length) addPersonalQuery(shortName, companyNames.map(c => `"${c}"`));
     }
     // De-duplicate queries to keep Serper usage efficient
     const dedupPersonal = Array.from(new Set(personalQueries));
@@ -254,7 +305,10 @@ export default new Worker("person-linkedin", async job => {
       personalQueries,
       companyQueries,
       seeds: { personal: personalSeeds.length, company: companySeeds.length },
-      tradingNames,
+      tradingNames: tradingNamesAll,
+      tradingNamesActive,
+      registeredNames: registeredNamesAll,
+      registeredNamesActive,
       companyNames
     });
     if (rootJobId) {
@@ -266,7 +320,9 @@ export default new Worker("person-linkedin", async job => {
           shortName,
           counts: { personal_total: personalQueries.length, full: personalFull.length, short: personalShort.length },
           samples: { full: personalFull.slice(0, 3), short: personalShort.slice(0, 3) },
-          companyQueries: companyQueries.slice(0, 3)
+          companyQueries: companyQueries.slice(0, 3),
+          tradingNamesActive,
+          registeredNames: registeredNamesAll
         });
       } catch {}
     }
@@ -432,7 +488,7 @@ export default new Worker("person-linkedin", async job => {
         fullName,
         dob,
         companies: companyNames,
-        trading: tradingNames,
+        trading: tradingNamesAll,
         websites: siteHosts,
         candidate: c,
         jobId: job.id as string,
@@ -449,7 +505,7 @@ export default new Worker("person-linkedin", async job => {
     const companyScored: Array<{ url: string; relevance: number; confidence: number; rationale: string }> = [];
     let csProcessed = 0;
     for (const c of companyCandidates) {
-      const s = await scoreCompanyCandidate({ companyNames, trading: tradingNames, candidate: c, jobId: job.id as string });
+      const s = await scoreCompanyCandidate({ companyNames, trading: tradingNamesAll, candidate: c, jobId: job.id as string });
       if (s) {
         companyScored.push({ url: c.url, ...s });
         await logEvent(job.id as string, 'info', 'AI score (company)', { url: c.url, relevance: s.relevance, confidence: s.confidence });
