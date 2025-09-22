@@ -6,7 +6,6 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - postgres
       - redis
     environment:
       NODE_ENV: ${NODE_ENV}
@@ -27,7 +26,6 @@ services:
     command: sh -c "npm run build && node dist/workers/chAppointments.js"
     depends_on:
       - redis
-      - postgres
     environment:
       # App DB
       DATABASE_URL: ${DATABASE_URL}
@@ -50,7 +48,6 @@ services:
     command: sh -c "npm run build && node dist/workers/companyDiscovery.js"
     depends_on:
       - redis
-      - postgres
     environment:
       # App DB
       DATABASE_URL: ${DATABASE_URL}
@@ -72,7 +69,6 @@ services:
     command: sh -c "npm run build && node dist/workers/personLinkedin.js"
     depends_on:
       - redis
-      - postgres
     environment:
       # App DB
       DATABASE_URL: ${DATABASE_URL}
@@ -96,7 +92,6 @@ services:
     command: sh -c "npm run build && node dist/workers/siteFetch.js"
     depends_on:
       - redis
-      - postgres
     environment:
       # App DB
       DATABASE_URL: ${DATABASE_URL}
@@ -116,16 +111,6 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
   pgadmin:
     image: dpage/pgadmin4:8.10
     environment:
@@ -136,8 +121,5 @@ services:
     volumes:
       - pgadmin_data:/var/lib/pgadmin
       - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
-    depends_on:
-      - postgres
 volumes:
-  pgdata:
   pgadmin_data:

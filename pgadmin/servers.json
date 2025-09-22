@@ -1,15 +1,14 @@
 {
   "Servers": {
     "1": {
-      "Name": "MarketOffer Postgres",
+      "Name": "MarketOffer Neon",
       "Group": "Servers",
-      "Host": "postgres",
+      "Host": "ep-twilight-paper-abzvpibw-pooler.eu-west-2.aws.neon.tech",
       "Port": 5432,
-      "MaintenanceDB": "marketoffer_linkedin_scraper",
-      "Username": "marketoffer",
-      "SSLMode": "prefer",
-      "ConnectNow": true
+      "MaintenanceDB": "neondb",
+      "Username": "neondb_owner",
+      "SSLMode": "require",
+      "ConnectNow": false
     }
   }
 }
-
