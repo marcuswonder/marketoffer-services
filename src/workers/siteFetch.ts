@@ -30,6 +30,45 @@ const MAX_PAGES_FOR_LLM = Number(process.env.SITEFETCH_MAX_PAGES || 5);
 const SNIPPET_CHARS = Number(process.env.SITEFETCH_MAX_SNIPPET_CHARS || 800);
 const LLM_DEBUG_LOGS = (process.env.LLM_DEBUG_LOGS || "").toLowerCase() === 'true';
 
+const SITEMAP_KEYWORDS = [
+  'privacy',
+  'terms',
+  'legal',
+  'cookies',
+  'policy',
+  'impressum',
+  'gdpr',
+  'compliance',
+  'regulation'
+];
+
+const DEFAULT_PATHS = [
+  '/',
+  '/privacy',
+  '/privacy-policy',
+  '/terms',
+  '/terms-of-service',
+  '/terms-and-conditions',
+  '/legal',
+  '/impressum',
+  '/cookies',
+  '/data-policy',
+  '/contact',
+  '/about'
+];
+
+const SHOPIFY_PATHS = [
+  '/',
+  '/policies/privacy-policy',
+  '/policies/terms-of-service',
+  '/policies/refund-policy',
+  '/policies/shipping-policy',
+  '/pages/privacy-policy',
+  '/pages/terms-of-service',
+  '/pages/contact',
+  '/pages/about-us'
+];
+
 // Load common URL endings from shared config; required (fail fast if missing/invalid)
 const endingsPath = path.join(process.cwd(), "config", "commonUrlEndings.json");
 const loadedEndings = JSON.parse(fs.readFileSync(endingsPath, 'utf-8'));
@@ -77,6 +116,155 @@ async function fetchStaticHtml(targetUrl: string): Promise<{ status: number; htm
   } catch {
     return { status: 0, html: "", contentType: null };
   }
+}
+
+async function fetchText(url: string): Promise<{ ok: boolean; status: number; text: string; contentType: string | null }> {
+  try {
+    const res = await fetch(url, { method: 'GET', redirect: 'follow' } as any);
+    const text = await res.text();
+    return { ok: res.status >= 200 && res.status < 400, status: res.status, text, contentType: res.headers.get('content-type') };
+  } catch {
+    return { ok: false, status: 0, text: '', contentType: null };
+  }
+}
+
+function extractSitemapUrlsFromRobots(robots: string): string[] {
+  const urls: string[] = [];
+  const lines = robots.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    if (trimmed.toLowerCase().startsWith('sitemap:')) {
+      const value = trimmed.slice(8).trim();
+      if (value) urls.push(value);
+    }
+  }
+  return urls;
+}
+
+function looksLikeShopify(html: string): boolean {
+  const lower = html.toLowerCase();
+  return (
+    lower.includes('name="generator" content="shopify"') ||
+    lower.includes('cdn.shopify.com') ||
+    lower.includes('shopify-checkout-api-token') ||
+    lower.includes('shopify-digital-wallet') ||
+    /id="shopify-section-[^"]+"/.test(lower) ||
+    lower.includes('window.shopify')
+  );
+}
+
+function extractLocs(xml: string): string[] {
+  const locs: string[] = [];
+  const regex = /<loc>([^<]+)<\/loc>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(xml)) !== null) {
+    locs.push(match[1].trim());
+  }
+  return locs;
+}
+
+async function gatherSitemapCandidates(host: string): Promise<string[]> {
+  const discovered = new Set<string>();
+  const queue: string[] = [];
+  const origins = [`https://${host}`, `http://${host}`];
+
+  for (const origin of origins) {
+    const robotsUrl = `${origin}/robots.txt`;
+    const res = await fetchText(robotsUrl);
+    if (res.ok && res.text) {
+      for (const url of extractSitemapUrlsFromRobots(res.text)) {
+        if (!discovered.has(url)) {
+          discovered.add(url);
+          queue.push(url);
+        }
+      }
+    }
+    if (queue.length) break;
+  }
+
+  if (!queue.length) {
+    const defaults = ['/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml', '/sitemap1.xml', '/sitemap/sitemap.xml'];
+    for (const path of defaults) {
+      const candidate = `https://${host}${path}`;
+      if (!discovered.has(candidate)) {
+        discovered.add(candidate);
+        queue.push(candidate);
+      }
+      if (queue.length >= 5) break;
+    }
+  }
+
+  return queue.slice(0, 10);
+}
+
+async function collectSitemapUrls(host: string): Promise<string[]> {
+  const visited = new Set<string>();
+  const queue = await gatherSitemapCandidates(host);
+  const results = new Set<string>();
+  const maxSitemaps = 5;
+  const maxUrls = 100;
+
+  while (queue.length && visited.size < maxSitemaps && results.size < maxUrls) {
+    const sitemapUrl = queue.shift()!;
+    if (visited.has(sitemapUrl)) continue;
+    visited.add(sitemapUrl);
+    const res = await fetchText(sitemapUrl);
+    if (!res.ok || !res.text) continue;
+
+    const xml = res.text;
+    const locs = extractLocs(xml);
+    if (!locs.length) continue;
+
+    if (/<sitemapindex/i.test(xml)) {
+      for (const loc of locs.slice(0, 5)) {
+        if (!visited.has(loc) && queue.length < maxSitemaps) queue.push(loc);
+      }
+      continue;
+    }
+
+    for (const loc of locs) {
+      if (results.size >= maxUrls) break;
+      try {
+        const url = new URL(loc);
+        const normalizedHost = url.hostname.replace(/^www\./, '');
+        if (normalizedHost !== host.replace(/^www\./, '')) continue;
+        results.add(url.pathname || '/');
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return Array.from(results);
+}
+
+function filterSitemapPaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const path of paths) {
+    const lower = path.toLowerCase();
+    if (!SITEMAP_KEYWORDS.some(k => lower.includes(k))) continue;
+    if (!seen.has(lower)) {
+      seen.add(lower);
+      out.push(path);
+    }
+  }
+  return out;
+}
+
+function dedupePaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const path of paths) {
+    const norm = path.startsWith('/') ? path : `/${path}`;
+    const clean = norm.replace(/\/+/g, '/');
+    if (!seen.has(clean)) {
+      seen.add(clean);
+      out.push(clean);
+    }
+  }
+  return out;
 }
 
 function extractBetween(html: string, re: RegExp): string[] {
@@ -388,9 +576,36 @@ export default new Worker("site-fetch", async job => {
     await logEvent(job.id as string, 'warn', 'Failed to tag site-fetch job on people', { error: String(e), companyNumber });
   }
   try {
-    const urls: string[] = [];
     const httpsBase = `https://${host}`;
-    for (const p of COMMON_PATHS) urls.push(httpsBase + p);
+    const homeUrl = `${httpsBase}/`;
+    let candidatePaths: string[] = [];
+    let cachedHome: { status: number; html: string; contentType: string | null } | null = null;
+    let pathSource: string = 'default';
+
+    try {
+      const sitemapCandidates = await collectSitemapUrls(host);
+      const filtered = filterSitemapPaths(sitemapCandidates);
+      if (filtered.length) {
+        candidatePaths = dedupePaths(['/', ...filtered.slice(0, 50)]);
+        pathSource = 'sitemap';
+      }
+    } catch (e) {
+      await logEvent(job.id as string, 'debug', 'Sitemap discovery failed', { host, error: String(e) });
+    }
+
+    if (!candidatePaths.length) {
+      cachedHome = await fetchStaticHtml(homeUrl);
+      const isShopify = cachedHome.status >= 200 && cachedHome.status < 400 && cachedHome.html ? looksLikeShopify(cachedHome.html) : false;
+      candidatePaths = dedupePaths(isShopify ? SHOPIFY_PATHS : DEFAULT_PATHS);
+      pathSource = isShopify ? 'shopify-fallback' : 'default-fallback';
+    }
+
+    const urls = candidatePaths.map(path => {
+      const clean = path === '/' ? '/' : path.startsWith('/') ? path : `/${path}`;
+      return `${httpsBase}${clean}`;
+    });
+
+    await logEvent(job.id as string, 'info', 'Selected candidate paths', { host, source: pathSource, count: urls.length });
 
     let bestScore = 0;
     let bestRationale = "";
@@ -411,8 +626,14 @@ export default new Worker("site-fetch", async job => {
       const t = stripTags(html || '').toLowerCase();
       return /page not found|not found|404|doesn't exist|does not exist|we can't find|we cannot find|page cannot be found|oops/i.test(t);
     };
+    const cachedResponses = new Map<string, { status: number; html: string; contentType: string | null }>();
+    if (cachedHome) cachedResponses.set(homeUrl, cachedHome);
     for (const url of urls) {
-      const r = await fetchStaticHtml(url);
+      let r = cachedResponses.get(url);
+      if (!r) {
+        r = await fetchStaticHtml(url);
+        cachedResponses.set(url, r);
+      }
       // Log raw static fetch (status + size + short snippet) for diagnostics
       try {
         await logEvent(job.id as string, 'info', 'Static fetch', {
