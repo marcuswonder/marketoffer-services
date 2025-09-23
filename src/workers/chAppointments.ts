@@ -436,16 +436,21 @@ export default new Worker("ch-appointments", async job => {
         ].join('|');
         const officerIds = Array.isArray(e.officer_ids) ? e.officer_ids : [];
         const { rows: personRows } = await query<{ id: number }>(
-          `INSERT INTO ch_people(job_id, person_key, contact_id, first_name, middle_names, last_name, full_name, dob_month, dob_year, dob_string, officer_ids, nationality, status)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          `INSERT INTO ch_people(job_id, root_job_id, person_key, contact_id, first_name, middle_names, last_name, full_name, dob_month, dob_year, dob_string, officer_ids, nationality, status, discovery_job_ids, sitefetch_job_ids, person_linkedin_job_ids)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
            ON CONFLICT (job_id, person_key)
            DO UPDATE SET contact_id=EXCLUDED.contact_id,
                          officer_ids=EXCLUDED.officer_ids,
                          nationality=EXCLUDED.nationality,
                          status=EXCLUDED.status,
+                         root_job_id=EXCLUDED.root_job_id,
+                         discovery_job_ids=ARRAY(SELECT DISTINCT UNNEST(COALESCE(ch_people.discovery_job_ids,'{}') || EXCLUDED.discovery_job_ids))::text[],
+                         sitefetch_job_ids=ARRAY(SELECT DISTINCT UNNEST(COALESCE(ch_people.sitefetch_job_ids,'{}') || EXCLUDED.sitefetch_job_ids))::text[],
+                         person_linkedin_job_ids=ARRAY(SELECT DISTINCT UNNEST(COALESCE(ch_people.person_linkedin_job_ids,'{}') || EXCLUDED.person_linkedin_job_ids))::text[],
                          updated_at=now()
            RETURNING id`,
           [
+            job.id as string,
             job.id as string,
             personKey,
             e.contact_id || null,
@@ -458,7 +463,10 @@ export default new Worker("ch-appointments", async job => {
             e.dob_string || null,
             officerIds.length ? officerIds : null,
             e.nationality || null,
-            f.status || 'Found via CH'
+            f.status || 'Found via CH',
+            [job.id as string],
+            [],
+            []
           ]
         );
         const personId = personRows[0]?.id;
@@ -549,6 +557,19 @@ export default new Worker("ch-appointments", async job => {
         { companyNumber: c.company_number, companyName: c.company_name, address: c.registered_address, postcode: c.registered_postcode, rootJobId: job.id },
         { jobId, priority: 1, attempts: 5, backoff: { type: "exponential", delay: 1500 } }
       );
+      try {
+        await query(
+          `UPDATE ch_people
+              SET discovery_job_ids = (
+                    SELECT ARRAY(SELECT DISTINCT UNNEST(COALESCE(ch_people.discovery_job_ids,'{}') || ARRAY[$1::text]))
+               ),
+                  updated_at = now()
+            WHERE job_id = $2`,
+          [jobId, job.id as string]
+        );
+      } catch (e) {
+        await logEvent(job.id as string, 'warn', 'Failed to tag discovery job on people', { jobId, error: String(e) });
+      }
       enqActive++;
     }
     // Skip discovery for non-active (e.g., dissolved) companies

@@ -317,6 +317,20 @@ Return strict JSON with both decision certainty and ownership likelihood:
         );
       } catch {}
       await siteFetchQ.add('fetch', payload, { jobId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
+      if (rootJobId) {
+        try {
+          await query(
+            `UPDATE ch_people
+                SET sitefetch_job_ids = (
+                      SELECT ARRAY(SELECT DISTINCT UNNEST(COALESCE(ch_people.sitefetch_job_ids,'{}') || ARRAY[$1::text]))
+                 )
+              WHERE job_id = $2`,
+            [jobId, rootJobId]
+          );
+        } catch (e) {
+          await logEvent(job.id as string, 'warn', 'Failed to tag site-fetch job on people', { error: String(e), jobId, rootJobId });
+        }
+      }
       enqueued++;
     }
     await logEvent(job.id as string, 'info', 'Enqueued site-fetch jobs', { scope: 'summary', enqueued, hosts: potentials });

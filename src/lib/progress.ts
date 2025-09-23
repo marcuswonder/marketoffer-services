@@ -40,6 +40,7 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS ch_people (
       id BIGSERIAL PRIMARY KEY,
       job_id TEXT NOT NULL,
+      root_job_id TEXT,
       person_key TEXT NOT NULL,
       contact_id TEXT,
       first_name TEXT,
@@ -52,6 +53,11 @@ export async function initDb() {
       dob_string TEXT,
       officer_ids TEXT[],
       status TEXT,
+      verified_director_linkedIns JSONB,
+      director_linkedIn_verification JSONB,
+      discovery_job_ids TEXT[],
+      sitefetch_job_ids TEXT[],
+      person_linkedin_job_ids TEXT[],
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE(job_id, person_key)
@@ -85,6 +91,12 @@ export async function initDb() {
     ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS trading_name TEXT;
     ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS verified_director_linkedIns JSONB;
     ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS director_linkedIn_verification JSONB;
+    ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS verified_director_linkedIns JSONB;
+    ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS director_linkedIn_verification JSONB;
+    ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS root_job_id TEXT;
+    ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS discovery_job_ids TEXT[];
+    ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS sitefetch_job_ids TEXT[];
+    ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS person_linkedin_job_ids TEXT[];
     CREATE INDEX IF NOT EXISTS ch_appointments_company_number_idx ON ch_appointments(company_number);
   `);
 }

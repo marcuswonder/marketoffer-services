@@ -546,10 +546,26 @@ export default new Worker("person-linkedin", async job => {
           if (!targetPersonId && ppl.length === 1) targetPersonId = ppl[0].id;
 
           if (targetPersonId) {
-            const addPersonalUrls = JSON.stringify(acceptedPersonal.map(x => x.url));
-            const addPersonalVerif = JSON.stringify(acceptedPersonal.map(x => ({ url: x.url, relevance: x.relevance, confidence: x.confidence, rationale: x.rationale })));
-            const addCompanyUrls = JSON.stringify(acceptedCompany.map(x => x.url));
-            const addCompanyVerif = JSON.stringify(acceptedCompany.map(x => ({ url: x.url, relevance: x.relevance, confidence: x.confidence, rationale: x.rationale })));
+            const personalUrlMap = new Map<string, { url: string; relevance: number; confidence: number; rationale: string }>();
+            for (const cand of acceptedPersonal) {
+              const url = (cand.url || '').trim();
+              if (!url) continue;
+              if (!personalUrlMap.has(url)) {
+                personalUrlMap.set(url, { url, relevance: cand.relevance, confidence: cand.confidence, rationale: cand.rationale });
+              }
+            }
+            const companyUrlMap = new Map<string, { url: string; relevance: number; confidence: number; rationale: string }>();
+            for (const cand of acceptedCompany) {
+              const url = (cand.url || '').trim();
+              if (!url) continue;
+              if (!companyUrlMap.has(url)) {
+                companyUrlMap.set(url, { url, relevance: cand.relevance, confidence: cand.confidence, rationale: cand.rationale });
+              }
+            }
+            const addPersonalUrls = JSON.stringify(Array.from(personalUrlMap.keys()));
+            const addPersonalVerif = JSON.stringify(Array.from(personalUrlMap.values()));
+            const addCompanyUrls = JSON.stringify(Array.from(companyUrlMap.keys()));
+            const addCompanyVerif = JSON.stringify(Array.from(companyUrlMap.values()));
             await query(
               `UPDATE ch_appointments
                  SET
@@ -593,6 +609,35 @@ export default new Worker("person-linkedin", async job => {
                WHERE person_id = $5`,
               [addPersonalUrls, addPersonalVerif, addCompanyUrls, addCompanyVerif, targetPersonId]
             );
+            await query(
+              `UPDATE ch_people
+                 SET
+                   verified_director_linkedIns = (
+                     SELECT CASE WHEN jsonb_typeof(COALESCE(verified_director_linkedIns, '[]'::jsonb)) = 'array'
+                                 THEN (
+                                   SELECT jsonb_agg(DISTINCT j.value)
+                                     FROM jsonb_array_elements(COALESCE(verified_director_linkedIns, '[]'::jsonb) || $1::jsonb) AS j(value)
+                                 )
+                                 ELSE $1::jsonb
+                            END
+                   ),
+                   director_linkedIn_verification = (
+                     SELECT CASE WHEN jsonb_typeof(COALESCE(director_linkedIn_verification, '[]'::jsonb)) = 'array'
+                                 THEN (
+                                   SELECT jsonb_agg(DISTINCT j.value)
+                                     FROM jsonb_array_elements(COALESCE(director_linkedIn_verification, '[]'::jsonb) || $2::jsonb) AS j(value)
+                                 )
+                                 ELSE $2::jsonb
+                            END
+                   ),
+                   person_linkedin_job_ids = (
+                     SELECT ARRAY(SELECT DISTINCT UNNEST(COALESCE(person_linkedin_job_ids,'{}') || ARRAY[$3::text]))
+                   ),
+                   updated_at = now()
+               WHERE id = $4`,
+              [addPersonalUrls, addPersonalVerif, job.id as string, targetPersonId]
+            );
+            await logEvent(job.id as string, 'info', 'Persisted LinkedIns to ch_people', { person_id: targetPersonId, personal_total: personalUrlMap.size });
             await logEvent(job.id as string, 'info', 'Persisted LinkedIns to ch_appointments', { person_id: targetPersonId, personal_added: acceptedPersonal.length, company_added: acceptedCompany.length, threshold: PERSON_LI_ACCEPT_THRESHOLD });
             if (rootJobId) {
               try { await logEvent(rootJobId, 'info', 'Person LI: persisted LinkedIns', { childJobId: job.id, person_id: targetPersonId, personal_added: acceptedPersonal.length, company_added: acceptedCompany.length }); } catch {}
@@ -638,6 +683,5 @@ export default new Worker("person-linkedin", async job => {
   } catch (err) {
     await failJob(job.id as string, err);
     logger.error({ err: String(err) }, 'Person LinkedIn worker failed');
-    throw err;
   }
 }, { connection, concurrency: 1 });

@@ -372,6 +372,22 @@ export default new Worker("site-fetch", async job => {
   const { host, companyNumber, companyName, address, postcode } = job.data as JobPayload;
   await startJob({ jobId: job.id as string, queue: 'site-fetch', name: job.name, payload: job.data });
   try {
+    if (companyNumber) {
+      await query(
+        `UPDATE ch_people AS p
+            SET sitefetch_job_ids = (
+                  SELECT ARRAY(SELECT DISTINCT UNNEST(COALESCE(p.sitefetch_job_ids,'{}') || ARRAY[$1::text]))
+             ),
+                updated_at = now()
+          FROM ch_appointments a
+         WHERE a.person_id = p.id AND a.company_number = $2`,
+        [job.id as string, companyNumber]
+      );
+    }
+  } catch (e) {
+    await logEvent(job.id as string, 'warn', 'Failed to tag site-fetch job on people', { error: String(e), companyNumber });
+  }
+  try {
     const urls: string[] = [];
     const httpsBase = `https://${host}`;
     for (const p of COMMON_PATHS) urls.push(httpsBase + p);
@@ -985,11 +1001,16 @@ export default new Worker("site-fetch", async job => {
                        LATERAL jsonb_array_elements(COALESCE(a.verified_company_linkedIns, '[]'::jsonb)) AS j(value)
                  WHERE a.person_id = $1
               ),
-              lp AS (
+              lp_appt AS (
                 SELECT j.value AS v
                   FROM ch_appointments a,
                        LATERAL jsonb_array_elements(COALESCE(a.verified_director_linkedIns, '[]'::jsonb)) AS j(value)
                  WHERE a.person_id = $1
+              ),
+              lp_person AS (
+                SELECT jsonb_array_elements(COALESCE(p.verified_director_linkedIns, '[]'::jsonb)) AS v
+                  FROM ch_people p
+                 WHERE p.id = $1
               ),
               tn AS (
                 SELECT to_jsonb(TRIM(a.trading_name)) AS v
@@ -999,7 +1020,11 @@ export default new Worker("site-fetch", async job => {
               SELECT
                 COALESCE((SELECT jsonb_agg(DISTINCT v) FROM w), '[]'::jsonb) AS websites,
                 COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lc), '[]'::jsonb) AS company_linkedins,
-                COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lp), '[]'::jsonb) AS personal_linkedins,
+                COALESCE((SELECT jsonb_agg(DISTINCT v) FROM (
+                  SELECT v FROM lp_appt
+                  UNION ALL
+                  SELECT v FROM lp_person
+                ) all_lp), '[]'::jsonb) AS personal_linkedins,
                 COALESCE((SELECT jsonb_agg(DISTINCT v) FROM tn), '[]'::jsonb) AS trading_names`;
             const { rows: aggRows } = await query<any>(aggSql, [Number((p as any).id)]);
             const aggWebsites: string[] = Array.isArray(aggRows?.[0]?.websites) ? aggRows[0].websites : [];
@@ -1109,11 +1134,17 @@ export default new Worker("site-fetch", async job => {
                      LATERAL jsonb_array_elements(COALESCE(verified_company_linkedIns, '[]'::jsonb)) AS j(value)
                WHERE company_number = $1
             ),
-            lp AS (
+            lp_appt AS (
               SELECT j.value AS v
                 FROM ch_appointments,
                      LATERAL jsonb_array_elements(COALESCE(verified_director_linkedIns, '[]'::jsonb)) AS j(value)
                WHERE company_number = $1
+            ),
+            lp_person AS (
+              SELECT jsonb_array_elements(COALESCE(p.verified_director_linkedIns, '[]'::jsonb)) AS v
+                FROM ch_people p
+                JOIN ch_appointments a ON a.person_id = p.id
+               WHERE a.company_number = $1
             ),
             tn AS (
               SELECT to_jsonb(TRIM(trading_name)) AS v
@@ -1123,7 +1154,11 @@ export default new Worker("site-fetch", async job => {
             SELECT
               COALESCE((SELECT jsonb_agg(DISTINCT v) FROM w), '[]'::jsonb) AS websites,
               COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lc), '[]'::jsonb) AS company_linkedins,
-              COALESCE((SELECT jsonb_agg(DISTINCT v) FROM lp), '[]'::jsonb) AS personal_linkedins,
+              COALESCE((SELECT jsonb_agg(DISTINCT v) FROM (
+                SELECT v FROM lp_appt
+                UNION ALL
+                SELECT v FROM lp_person
+              ) all_lp), '[]'::jsonb) AS personal_linkedins,
               COALESCE((SELECT jsonb_agg(DISTINCT v) FROM tn), '[]'::jsonb) AS trading_names`;
           const { rows: aggRows } = await query<any>(aggSql, [companyNumber]);
           const aggWebsites: string[] = Array.isArray(aggRows?.[0]?.websites) ? aggRows[0].websites : [];
@@ -1221,6 +1256,5 @@ export default new Worker("site-fetch", async job => {
   } catch (err) {
     await failJob(job.id as string, err);
     logger.error({ host, err: String(err) }, 'Site fetch failed');
-    throw err;
   }
 }, { connection, concurrency: 1 });

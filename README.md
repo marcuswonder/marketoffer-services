@@ -1,4 +1,4 @@
-# MarketOffer Services (API, Workers, Redis, Postgres, pgAdmin)
+# MarketOffer Services (API, Workers, Redis)
 
 Local development stack for MarketOffer scraping/processing pipelines.
 
@@ -6,9 +6,8 @@ What’s included
 - **API**: Node + Express (`src/api/index.ts`) with Bull Board.
 - **Workers**: TypeScript workers for 3 pipelines (CH appointments, company discovery, person LinkedIn).
 - **Queues**: Redis + BullMQ (`src/queues`).
-- **Postgres**: job tracking + CH data storage (`src/lib/progress.ts`).
-- **pgAdmin**: UI on port 5050 with auto‑registered server.
-- **Docker Compose**: profiles to run infra/app/workers independently.
+- **Postgres (external)**: job tracking + CH data storage (`src/lib/progress.ts`).
+- **Docker Compose**: profiles to run infra/app/workers independently (Redis is the only bundled service).
 
 ## Prerequisites
 - Docker + Docker Compose
@@ -18,7 +17,7 @@ What’s included
 ## Running locally
 
 Common commands
-- Infra only (Redis, Postgres, pgAdmin): `docker compose up -d`
+- Infra only (Redis): `docker compose up -d redis`
 - API only: `docker compose --profile app up -d web`
 - Workers only: `docker compose --profile workers up -d`
 - API + Workers: `docker compose --profile app --profile workers up -d`
@@ -27,20 +26,11 @@ Common commands
 Ports
 - API: `http://localhost:3000`
 - Bull Board: `http://localhost:3000/admin/queues`
-- pgAdmin: `http://localhost:5050`
-
-## pgAdmin auto‑registration
-- A server named “MarketOffer Postgres” is preconfigured via `pgadmin/servers.json` and mounted into the container.
-- On first start, log in with `.env` credentials (`PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD`).
-- If pgAdmin has run before, the import won’t reapply. To reset:
-  - `docker compose down`
-  - `docker volume rm marketoffer_services_pgadmin_data`
-  - `docker compose up -d pgadmin`
 
 ## Database
 - Postgres is seeded on demand (no schema file). The API and workers run `initDb()` to create required tables (`job_progress`, `job_events`, `ch_people`, `ch_appointments`).
 - Connection uses `DATABASE_URL` if set; otherwise it is built from `POSTGRES_HOST/PORT/USER/PASSWORD/DB` (see `src/lib/db.ts`).
-- For Node running outside Docker, set `POSTGRES_HOST=localhost` (or set `DATABASE_URL` accordingly). Inside Compose, `POSTGRES_HOST=postgres` works via the Docker network.
+- The stack now expects an external Postgres (e.g. Neon). When running locally, set `POSTGRES_HOST`/`DATABASE_URL` to point at your hosted instance. Redis is the only stateful service in Docker Compose.
 
 ## API endpoints
 - Health: `GET /health`
@@ -57,8 +47,7 @@ curl -X POST http://localhost:3000/api/jobs/ch-appointments \
   -d '{"companyNumber":"01234567","firstName":"Jane","lastName":"Doe"}'
 ```
 
-## Local development (without Docker for app)
-- Ensure Redis/Postgres are running (e.g., `docker compose up -d redis postgres`).
+- Ensure Redis is running (e.g., `docker compose up -d redis`) and that `DATABASE_URL` points to your external Postgres.
 - Update `.env` so `POSTGRES_HOST=localhost` and `REDIS_URL=redis://localhost:6379`.
 - Run API: `npm run dev`
 - Run workers (pick one):
@@ -69,8 +58,7 @@ curl -X POST http://localhost:3000/api/jobs/ch-appointments \
 ## Volumes (useful during resets)
 - List all: `docker volume ls`
 - List project volumes: `docker volume ls -f "label=com.docker.compose.project=marketoffer_services"`
-- Remove pgAdmin data: `docker volume rm marketoffer_services_pgadmin_data`
-- Remove Postgres data (destroys DB): `docker volume rm marketoffer_services_pgdata`
+- Remove Redis data: `docker volume rm marketoffer_services_redis-data` (if you add a volume mapping)
 - Remove all unused: `docker volume prune`
 
 ## Project structure
