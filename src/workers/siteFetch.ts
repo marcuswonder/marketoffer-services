@@ -9,6 +9,7 @@ import { cleanCompanyName, baseHost } from "../lib/normalize.js";
 import { query } from "../lib/db.js";
 import fs from "fs";
 import path from "path";
+import pLimit from "p-limit";
 
 type JobPayload = {
   host: string;
@@ -29,6 +30,8 @@ const ACCEPT_THRESHOLD = Number(process.env.SITEFETCH_ACCEPT_THRESHOLD || 0.75);
 const MAX_PAGES_FOR_LLM = Number(process.env.SITEFETCH_MAX_PAGES || 5);
 const SNIPPET_CHARS = Number(process.env.SITEFETCH_MAX_SNIPPET_CHARS || 800);
 const LLM_DEBUG_LOGS = (process.env.LLM_DEBUG_LOGS || "").toLowerCase() === 'true';
+const SITEFETCH_MODE = (process.env.SITEFETCH_MODE || 'static_first').toLowerCase();
+const USE_STATIC_FETCH = SITEFETCH_MODE !== 'bee_only';
 
 const SITEMAP_KEYWORDS = [
   'privacy',
@@ -68,14 +71,6 @@ const SHOPIFY_PATHS = [
   '/pages/contact',
   '/pages/about-us'
 ];
-
-// Load common URL endings from shared config; required (fail fast if missing/invalid)
-const endingsPath = path.join(process.cwd(), "config", "commonUrlEndings.json");
-const loadedEndings = JSON.parse(fs.readFileSync(endingsPath, 'utf-8'));
-if (!Array.isArray(loadedEndings)) {
-  throw new Error("Invalid commonUrlEndings.json: expected an array of strings");
-}
-const COMMON_PATHS: string[] = Array.from(new Set(loadedEndings));
 
 await initDb();
 
@@ -644,10 +639,15 @@ export default new Worker("site-fetch", async job => {
     }
 
     if (!candidatePaths.length) {
-      cachedHome = await fetchStaticHtml(homeUrl);
-      const isShopify = cachedHome.status >= 200 && cachedHome.status < 400 && cachedHome.html ? looksLikeShopify(cachedHome.html) : false;
-      candidatePaths = dedupePaths(isShopify ? SHOPIFY_PATHS : DEFAULT_PATHS);
-      pathSource = isShopify ? 'shopify-fallback' : 'default-fallback';
+      if (USE_STATIC_FETCH) {
+        cachedHome = await fetchStaticHtml(homeUrl);
+        const isShopify = cachedHome.status >= 200 && cachedHome.status < 400 && cachedHome.html ? looksLikeShopify(cachedHome.html) : false;
+        candidatePaths = dedupePaths(isShopify ? SHOPIFY_PATHS : DEFAULT_PATHS);
+        pathSource = isShopify ? 'shopify-fallback' : 'default-fallback';
+      } else {
+        candidatePaths = dedupePaths(DEFAULT_PATHS);
+        pathSource = 'default-fallback';
+      }
     }
 
     const urls = candidatePaths.map(path => {
@@ -670,100 +670,104 @@ export default new Worker("site-fetch", async job => {
     let lastDecisionConfidence: number | null = null;
     let tradingName: string | null = null;
 
-    // First pass: cheap static fetch to avoid ScrapingBee credits on obvious 404/robots/soft-404 pages
-    const useStaticSignals = !BEE_KEY || BEE_MAX_PAGES <= 0; // if Bee unavailable, fall back to static signals
-    const isSoft404 = (html: string) => {
-      const t = stripTags(html || '').toLowerCase();
-      return /page not found|not found|404|doesn't exist|does not exist|we can't find|we cannot find|page cannot be found|oops/i.test(t);
-    };
-    const cachedResponses = new Map<string, { status: number; html: string; contentType: string | null }>();
-    if (cachedHome) cachedResponses.set(homeUrl, cachedHome);
-    for (const url of urls) {
-      let r = cachedResponses.get(url);
-      if (!r) {
-        r = await fetchStaticHtml(url);
-        cachedResponses.set(url, r);
-      }
-      // Log raw static fetch (status + size + short snippet) for diagnostics
-      try {
-        await logEvent(job.id as string, 'info', 'Static fetch', {
-          url,
-          status: r.status,
-          bytes: (r.html || '').length,
-          contentType: r.contentType || '',
-          snippet: stripTags(r.html || '').slice(0, 600)
-        });
-      } catch {}
-      if (r.status >= 200 && r.status < 400 && r.html.length >= 200 && !isSoft404(r.html)) {
-        staticOk.push({ url, status: r.status, html: r.html });
-        // Early decision: if page explicitly declares a different company number, abort further checks for this host (only when static content provides a labeled CRN)
-        const sigEarly = parseHtmlSignals(r.html);
-        const labeled = findLabeledCompanyNumber(sigEarly.textChunk);
-        if (labeled) {
-          if (targetNum && labeled !== targetNum) {
-            abortHost = true;
-            bestScore = 0;
-            bestRationale = `Company number mismatch: found ${labeled}`;
-            await logEvent(job.id as string, 'info', 'Early reject (mismatched company number)', { url, found: labeled, expected: targetNum });
-            break;
-          }
-          if (targetNum && labeled === targetNum) {
-            bestScore = 0.9;
-            bestRationale = 'Company number match';
-            earlyAccepted = true;
-            await logEvent(job.id as string, 'info', 'Early accept (company number match)', { url, found: labeled });
-            break;
-          }
+    if (USE_STATIC_FETCH) {
+      // First pass: cheap static fetch to avoid ScrapingBee credits on obvious 404/robots/soft-404 pages
+      const useStaticSignals = !BEE_KEY || BEE_MAX_PAGES <= 0; // if Bee unavailable, fall back to static signals
+      const isSoft404 = (html: string) => {
+        const t = stripTags(html || '').toLowerCase();
+        return /page not found|not found|404|doesn't exist|does not exist|we can't find|we cannot find|page cannot be found|oops/i.test(t);
+      };
+      const cachedResponses = new Map<string, { status: number; html: string; contentType: string | null }>();
+      if (cachedHome) cachedResponses.set(homeUrl, cachedHome);
+      for (const url of urls) {
+        let r = cachedResponses.get(url);
+        if (!r) {
+          r = await fetchStaticHtml(url);
+          cachedResponses.set(url, r);
         }
-        // Only if Bee is not available, use static signals for evidence + scoring
-        if (useStaticSignals) {
-          const sig = sigEarly;
-          for (const li of sig.linkedins) {
-            if (/linkedin\.com\/company\//i.test(li)) foundCompanyLIs.add(li);
-            if (/linkedin\.com\/in\//i.test(li)) foundPersonalLIs.add(li);
-          }
-          const nums = extractCompanyNumbers(sig.textChunk);
-          const pcs = Array.from(new Set((sig.textChunk.match(/[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/gi) || []).map(s => s.toUpperCase())));
-          const emails = sig.emails || [];
-          pageEvidence.push({
+        // Log raw static fetch (status + size + short snippet) for diagnostics
+        try {
+          await logEvent(job.id as string, 'info', 'Static fetch', {
             url,
-            title: sig.title || '',
-            meta: sig.metaDesc || '',
-            h1: sig.h1s || [],
-            jsonld_org_name: (()=>{
-              for (const j of sig.jsonld) {
-                const t = (j && (j["@type"] || j["@type"])) || null;
-                const types = Array.isArray(t) ? t : (t ? [t] : []);
-                if (types.map(String).map(s=>s.toLowerCase()).includes("organization")) {
-                  const nm = String((j.name || j["legalName"] || ""));
-                  if (nm) return nm;
-                }
-              }
-              return undefined;
-            })(),
-            company_numbers: nums,
-            postcodes: pcs,
-            emails,
-            linkedins: sig.linkedins || [],
-            text_snippet: stripTags(r.html).slice(0, SNIPPET_CHARS)
+            status: r.status,
+            bytes: (r.html || '').length,
+            contentType: r.contentType || '',
+            snippet: stripTags(r.html || '').slice(0, 600)
           });
-          if (!LLM_ONLY) {
-            const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
-            await logEvent(job.id as string, 'debug', 'Scored static page', { url, status: r.status, score, rationale });
-            if (score > bestScore) { bestScore = score; bestRationale = rationale; }
+        } catch {}
+        if (r.status >= 200 && r.status < 400 && r.html.length >= 200 && !isSoft404(r.html)) {
+          staticOk.push({ url, status: r.status, html: r.html });
+          // Early decision: if page explicitly declares a different company number, abort further checks for this host (only when static content provides a labeled CRN)
+          const sigEarly = parseHtmlSignals(r.html);
+          const labeled = findLabeledCompanyNumber(sigEarly.textChunk);
+          if (labeled) {
+            if (targetNum && labeled !== targetNum) {
+              abortHost = true;
+              bestScore = 0;
+              bestRationale = `Company number mismatch: found ${labeled}`;
+              await logEvent(job.id as string, 'info', 'Early reject (mismatched company number)', { url, found: labeled, expected: targetNum });
+              break;
+            }
+            if (targetNum && labeled === targetNum) {
+              bestScore = 0.9;
+              bestRationale = 'Company number match';
+              earlyAccepted = true;
+              await logEvent(job.id as string, 'info', 'Early accept (company number match)', { url, found: labeled });
+              break;
+            }
+          }
+          // Only if Bee is not available, use static signals for evidence + scoring
+          if (useStaticSignals) {
+            const sig = sigEarly;
+            for (const li of sig.linkedins) {
+              if (/linkedin\.com\/company\//i.test(li)) foundCompanyLIs.add(li);
+              if (/linkedin\.com\/in\//i.test(li)) foundPersonalLIs.add(li);
+            }
+            const nums = extractCompanyNumbers(sig.textChunk);
+            const pcs = Array.from(new Set((sig.textChunk.match(/[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/gi) || []).map(s => s.toUpperCase())));
+            const emails = sig.emails || [];
+            pageEvidence.push({
+              url,
+              title: sig.title || '',
+              meta: sig.metaDesc || '',
+              h1: sig.h1s || [],
+              jsonld_org_name: (()=>{
+                for (const j of sig.jsonld) {
+                  const t = (j && (j["@type"] || j["@type"])) || null;
+                  const types = Array.isArray(t) ? t : (t ? [t] : []);
+                  if (types.map(String).map(s=>s.toLowerCase()).includes("organization")) {
+                    const nm = String((j.name || j["legalName"] || ""));
+                    if (nm) return nm;
+                  }
+                }
+                return undefined;
+              })(),
+              company_numbers: nums,
+              postcodes: pcs,
+              emails,
+              linkedins: sig.linkedins || [],
+              text_snippet: stripTags(r.html).slice(0, SNIPPET_CHARS)
+            });
+            if (!LLM_ONLY) {
+              const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
+              await logEvent(job.id as string, 'debug', 'Scored static page', { url, status: r.status, score, rationale });
+              if (score > bestScore) { bestScore = score; bestRationale = rationale; }
+            }
           }
         }
+        await new Promise(r => setTimeout(r, 250));
+        if (abortHost || earlyAccepted) break;
       }
-      await new Promise(r => setTimeout(r, 250));
-      if (abortHost || earlyAccepted) break;
+    } else {
+      await logEvent(job.id as string, 'info', 'Static fetch skipped', { host, mode: SITEFETCH_MODE });
     }
 
-  if (!staticOk.length) {
-      await logEvent(job.id as string, 'info', 'No reachable pages; skipping Bee', { host });
+    if (USE_STATIC_FETCH && !staticOk.length) {
+      await logEvent(job.id as string, 'info', 'No reachable pages from static fetch', { host });
     }
 
-    // Optional escalation to ScrapingBee: only if static confidence is low and we have a reachable candidate
-    if (!abortHost && BEE_KEY && staticOk.length && BEE_MAX_PAGES > 0) {
+    // Optional escalation to ScrapingBee: only if we have a ScrapingBee key and candidates
+    if (!abortHost && BEE_KEY && BEE_MAX_PAGES > 0 && urls.length) {
       // Prioritize legal pages (privacy, privacy-policy, impressum, terms, about, contact) for JS-rendered content
       const legalWeight = (u: string) => {
         try {
@@ -781,29 +785,33 @@ export default new Worker("site-fetch", async job => {
       const isLegal = (u: string) => {
         try { const p = new URL(u).pathname.toLowerCase(); return /\/privacy(\-policy)?\/?$|\/impressum\/?$/.test(p); } catch { return false; }
       };
-      const absUrl = (href: string, base: string) => { try { return new URL(href, base).toString(); } catch { return ''; } };
-      const extractIframes = (html: string, baseUrl: string): string[] => {
-        const ifr: string[] = [];
-        const re = /<iframe[^>]+src=["']([^"']+)["'][^>]*>/gi;
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(html))) {
-          const u = absUrl(m[1], baseUrl);
-          if (u) ifr.push(u);
-        }
-        return Array.from(new Set(ifr));
-      };
-      const beeCandidates = staticOk
+
+      const baseBeeCandidates = (staticOk.length ? staticOk : urls.map(url => ({ url, status: 0, html: '' })));
+      const beeCandidates = baseBeeCandidates
         .slice(0)
         .sort((a, b) => legalWeight(b.url) - legalWeight(a.url));
-      let used = 0;
 
-      // New step: If we have a company number, search Serper for pages on this host mentioning the CRN, fetch them via Bee first
+      const reasonMap = new Map<string, 'crn-site' | 'candidate'>();
+      const finalBeeList: string[] = [];
+      const seenBee = new Set<string>();
+
+      const tryAddUrl = (url: string, reason: 'crn-site' | 'candidate') => {
+        if (!url) return;
+        if (seenBee.has(url)) return;
+        seenBee.add(url);
+        if (finalBeeList.length < BEE_MAX_PAGES) {
+          finalBeeList.push(url);
+          reasonMap.set(url, reason);
+        }
+      };
+
+      const crnUrls: string[] = [];
       if (targetNum && SERPER_API_KEY) {
         try {
           const q = `${targetNum} site:${host}`;
           const resp = await serperSearch(q);
           const organic = Array.isArray((resp.data as any)?.organic) ? (resp.data as any).organic : [];
-          const sample = organic.slice(0,5).map((it: any) => ({ link: it.link, title: it.title, snippet: it.snippet }));
+          const sample = organic.slice(0, 5).map((it: any) => ({ link: it.link, title: it.title, snippet: it.snippet }));
           await logEvent(job.id as string, 'info', 'Serper fetch (crn-site)', {
             q,
             status: resp.status,
@@ -811,180 +819,94 @@ export default new Worker("site-fetch", async job => {
             counts: { organic: organic.length },
             sample
           });
-          const crnUrls: string[] = Array.from(
-            new Set<string>(
-              (organic as any[])
-                .map((it: any) => String(it.link || ''))
-                .filter((u: string) => u && baseHost(u) === host)
-            )
-          ).slice(0, Math.max(0, BEE_MAX_PAGES - used));
-          for (const u of crnUrls) {
-            if (used >= BEE_MAX_PAGES) break;
-            const r = await fetchBeeHtml(u, true, 3000, 'p span');
+          for (const it of organic) {
+            const link = String(it?.link || it?.url || '');
+            if (!link) continue;
             try {
-              await logEvent(job.id as string, 'info', 'Bee fetch (crn-site)', {
-                url: u,
-                status: r.status,
-                bytes: (r.html || '').length,
-                preferFull: true,
-                waitMs: 3000,
-                waitFor: 'p span',
-                snippet: stripTags(r.html || '').slice(0, 600)
-              });
+              const u = new URL(link);
+              if (u.hostname.replace(/^www\./, '') === host.replace(/^www\./, '')) {
+                crnUrls.push(u.toString());
+              }
             } catch {}
-            if (r.status >= 200 && (r.html || '').length >= 200) {
-              used++;
-              const sig = parseHtmlSignals(r.html);
-              for (const li of sig.linkedins) {
-                if (/linkedin\.com\/company\//i.test(li)) foundCompanyLIs.add(li);
-                if (/linkedin\.com\/in\//i.test(li)) foundPersonalLIs.add(li);
-              }
-              const nums = extractCompanyNumbers(sig.textChunk);
-              const pcs = Array.from(new Set((sig.textChunk.match(/[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/gi) || []).map(s => s.toUpperCase())));
-              pageEvidence.push({
-                url: u,
-                title: sig.title || '',
-                meta: sig.metaDesc || '',
-                h1: sig.h1s || [],
-                jsonld_org_name: (()=>{
-                  for (const j of sig.jsonld) {
-                    const t = (j && (j["@type"] || j["@type"])) || null;
-                    const types = Array.isArray(t) ? t : (t ? [t] : []);
-                    if (types.map(String).map(s=>s.toLowerCase()).includes("organization")) {
-                      const nm = String((j.name || j["legalName"] || ""));
-                      if (nm) return nm;
-                    }
-                  }
-                  return undefined;
-                })(),
-                company_numbers: nums,
-                postcodes: pcs,
-                emails: sig.emails || [],
-                linkedins: sig.linkedins || [],
-                text_snippet: stripTags(r.html || '').slice(0, SNIPPET_CHARS)
-              });
-              if (!LLM_ONLY) {
-                const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
-                await logEvent(job.id as string, 'debug', 'Scored bee page', { url: u, score, rationale, numbers_found: nums.length });
-                if (score > bestScore) { bestScore = score; bestRationale = `Bee: ${rationale}`; }
-              }
-            }
-            await new Promise(r => setTimeout(r, 200));
           }
         } catch {}
       }
-      for (const candidate of beeCandidates.slice(0, BEE_MAX_PAGES)) {
-        const preferFull = legalWeight(candidate.url) >= 90;
-        const waitMs = isLegal(candidate.url) ? 3000 : undefined;
-        const waitFor = isLegal(candidate.url) ? 'p span' : undefined;
-        const r = await fetchBeeHtml(candidate.url, preferFull, waitMs, waitFor);
-        try {
-          await logEvent(job.id as string, 'info', 'Bee fetch', {
-            url: candidate.url,
-            status: r.status,
-            bytes: (r.html || '').length,
-            preferFull,
-            waitMs: waitMs || 0,
-            waitFor: waitFor || '',
-            snippet: stripTags(r.html || '').slice(0, 600)
-          });
-        } catch {}
-        if (r.status >= 200 && r.status < 400 && r.html.length >= 200) {
-          beeCalls += 1;
-          const sig = parseHtmlSignals(r.html);
-          for (const li of sig.linkedins) {
-            if (/linkedin\.com\/company\//i.test(li)) foundCompanyLIs.add(li);
-            if (/linkedin\.com\/in\//i.test(li)) foundPersonalLIs.add(li);
-          }
-          // Append evidence
-          const nums = extractCompanyNumbers(sig.textChunk);
-          const pcs = Array.from(new Set((sig.textChunk.match(/[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/gi) || []).map(s => s.toUpperCase())));
-          pageEvidence.push({
-            url: candidate.url,
-            title: sig.title || '',
-            meta: sig.metaDesc || '',
-            h1: sig.h1s || [],
-            jsonld_org_name: (()=>{
-              for (const j of sig.jsonld) {
-                const t = (j && (j["@type"] || j["@type"])) || null;
-                const types = Array.isArray(t) ? t : (t ? [t] : []);
-                if (types.map(String).map(s=>s.toLowerCase()).includes("organization")) {
-                  const nm = String((j.name || j["legalName"] || ""));
-                  if (nm) return nm;
-                }
-              }
-              return undefined;
-            })(),
-            company_numbers: nums,
-            postcodes: pcs,
-            emails: sig.emails || [],
-            linkedins: sig.linkedins || [],
-            text_snippet: stripTags(r.html).slice(0, SNIPPET_CHARS)
-          });
-          if (!LLM_ONLY) {
-            const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
-            await logEvent(job.id as string, 'debug', 'Scored bee page', { url: candidate.url, score, rationale, numbers_found: nums.length });
-            if (score > bestScore) { bestScore = score; bestRationale = `Bee: ${rationale}`; }
-          }
 
-          // If this is a legal page and we still don't have strong signals, try following up to 2 iframes
-          if (isLegal(candidate.url) && used < BEE_MAX_PAGES) {
-            const iframes = extractIframes(r.html, candidate.url).slice(0, 2);
-            for (const ifu of iframes) {
-              if (used >= BEE_MAX_PAGES) break;
-              const ri = await fetchBeeHtml(ifu, true, 3000, 'p span');
-              try {
-                await logEvent(job.id as string, 'info', 'Bee fetch (iframe)', {
-                  url: ifu,
-                  status: ri.status,
-                  bytes: (ri.html || '').length,
-                  preferFull: true,
-                  waitMs: 3000,
-                  waitFor: 'p span',
-                  snippet: stripTags(ri.html || '').slice(0, 600)
-                });
-              } catch {}
-              if (ri.status >= 200 && ri.status < 400 && ri.html.length >= 200) {
-                beeCalls += 1;
-                const isig = parseHtmlSignals(ri.html);
-                const inums = extractCompanyNumbers(isig.textChunk);
-                const ipcs = Array.from(new Set((isig.textChunk.match(/[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/gi) || []).map(s => s.toUpperCase())));
-                pageEvidence.push({
-                  url: ifu,
-                  title: isig.title || '',
-                  meta: isig.metaDesc || '',
-                  h1: isig.h1s || [],
-                  jsonld_org_name: (()=>{
-                    for (const j of isig.jsonld) {
-                      const t = (j && (j["@type"] || j["@type"])) || null;
-                      const types = Array.isArray(t) ? t : (t ? [t] : []);
-                      if (types.map(String).map(s=>s.toLowerCase()).includes("organization")) {
-                        const nm = String((j.name || j["legalName"] || ""));
-                        if (nm) return nm;
-                      }
-                    }
-                    return undefined;
-                  })(),
-                  company_numbers: inums,
-                  postcodes: ipcs,
-                  emails: isig.emails || [],
-                  linkedins: isig.linkedins || [],
-                  text_snippet: stripTags(ri.html).slice(0, SNIPPET_CHARS)
-                });
-                if (!LLM_ONLY) {
-                  const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: isig });
-                  await logEvent(job.id as string, 'debug', 'Scored bee iframe page', { url: ifu, score, rationale, numbers_found: inums.length });
-                  if (score > bestScore) { bestScore = score; bestRationale = `Bee iframe: ${rationale}`; }
+      for (const u of crnUrls) {
+        if (finalBeeList.length >= BEE_MAX_PAGES) break;
+        tryAddUrl(u, 'crn-site');
+      }
+
+      for (const candidate of beeCandidates) {
+        if (finalBeeList.length >= BEE_MAX_PAGES) break;
+        tryAddUrl(candidate.url, 'candidate');
+      }
+
+      const limit = pLimit(Math.min(10, Math.max(1, BEE_MAX_PAGES)));
+
+      const processBeeUrl = async (url: string, reason: 'crn-site' | 'candidate') => {
+        try {
+          const preferFull = legalWeight(url) >= 90;
+          const waitMs = isLegal(url) ? 3000 : undefined;
+          const waitFor = isLegal(url) ? 'p span' : undefined;
+          const res = await fetchBeeHtml(url, preferFull, waitMs, waitFor);
+          const eventName = reason === 'crn-site' ? 'Bee fetch (crn-site)' : 'Bee fetch';
+          try {
+            await logEvent(job.id as string, 'info', eventName, {
+              url,
+              status: res.status,
+              bytes: (res.html || '').length,
+              preferFull,
+              waitMs: waitMs || 0,
+              waitFor: waitFor || '',
+              snippet: stripTags(res.html || '').slice(0, 600)
+            });
+          } catch {}
+          if (res.status >= 200 && res.status < 400 && (res.html || '').length >= 200) {
+            beeCalls += 1;
+            const sig = parseHtmlSignals(res.html);
+            for (const li of sig.linkedins) {
+              if (/linkedin\.com\/company\//i.test(li)) foundCompanyLIs.add(li);
+              if (/linkedin\.com\/in\//i.test(li)) foundPersonalLIs.add(li);
+            }
+            const nums = extractCompanyNumbers(sig.textChunk);
+            const pcs = Array.from(new Set((sig.textChunk.match(/[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/gi) || []).map(s => s.toUpperCase())));
+            pageEvidence.push({
+              url,
+              title: sig.title || '',
+              meta: sig.metaDesc || '',
+              h1: sig.h1s || [],
+              jsonld_org_name: (()=>{
+                for (const j of sig.jsonld) {
+                  const t = (j && (j["@type"] || j["@type"])) || null;
+                  const types = Array.isArray(t) ? t : (t ? [t] : []);
+                  if (types.map(String).map(s=>s.toLowerCase()).includes("organization")) {
+                    const nm = String((j.name || j["legalName"] || ""));
+                    if (nm) return nm;
+                  }
                 }
-              }
-              used++;
+                return undefined;
+              })(),
+              company_numbers: nums,
+              postcodes: pcs,
+              emails: sig.emails || [],
+              linkedins: sig.linkedins || [],
+              text_snippet: stripTags(res.html).slice(0, SNIPPET_CHARS)
+            });
+            if (!LLM_ONLY) {
+              const { score, rationale } = scoreOwnership({ host, companyName, companyNumber, postcode, signals: sig });
+              await logEvent(job.id as string, 'debug', 'Scored bee page', { url, score, rationale, numbers_found: nums.length });
+              if (score > bestScore) { bestScore = score; bestRationale = `Bee: ${rationale}`; }
             }
           }
+        } catch (err) {
+          await logEvent(job.id as string, 'warn', 'Bee fetch failed', { url, error: String(err), reason });
         }
-        used++;
-        if (used >= BEE_MAX_PAGES) break;
-        await new Promise(r => setTimeout(r, 400));
-      }
+      };
+
+      await Promise.all(
+        finalBeeList.map(url => limit(() => processBeeUrl(url, reasonMap.get(url) || 'candidate')))
+      );
     }
 
     // Deterministic acceptance: exact CH number, exact company name, or exact postcode
