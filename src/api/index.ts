@@ -4,6 +4,8 @@ import { logger } from "../lib/logger.js";
 import { router as jobsRouter } from "./routes/jobs.js";
 import { router as progressRouter } from "./routes/progress.js";
 import { router as uiRouter } from "./routes/ui.js";
+import { router as requestsUiRouter } from "./routes/requests_ui.js";
+import { router as progressUiRouter } from "./routes/progress_ui.js";
 import { router as settingsRouter } from "./routes/settings.js";
 import { router as requestRouter } from "./routes/request.js";
 import { router as settingsUiRouter } from "./routes/settings_ui.js";
@@ -37,6 +39,8 @@ createBullBoard({
 });
 app.use("/admin/queues", serverAdapter.getRouter());
 app.use("/admin/workflows", uiRouter);
+app.use("/admin/requests", requestsUiRouter);
+app.use("/admin/progress", progressUiRouter);
 app.use("/admin/request", requestRouter);
 app.use("/admin/settings", settingsUiRouter);
 
