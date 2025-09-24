@@ -29,6 +29,9 @@ const ACCEPT_THRESHOLD = Number(process.env.SITEFETCH_ACCEPT_THRESHOLD || 0.75);
 const MAX_PAGES_FOR_LLM = Number(process.env.SITEFETCH_MAX_PAGES || 5);
 const SNIPPET_CHARS = Number(process.env.SITEFETCH_MAX_SNIPPET_CHARS || 800);
 const LLM_DEBUG_LOGS = (process.env.LLM_DEBUG_LOGS || "").toLowerCase() === 'true';
+const SITEFETCH_MODE = (process.env.SITEFETCH_MODE || 'static_first').toLowerCase();
+
+const USE_STATIC_FETCH = SITEFETCH_MODE !== 'bee_only';
 
 const SITEMAP_KEYWORDS = [
   'privacy',
