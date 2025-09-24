@@ -107,6 +107,7 @@ services:
       SCRAPINGBEE_API_KEY: ${SCRAPINGBEE_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       SERPER_API_KEY: ${SERPER_API_KEY}
+      SITEFETCH_MODE: ${SITEFETCH_MODE}
   redis:
     image: redis:7-alpine
     ports:

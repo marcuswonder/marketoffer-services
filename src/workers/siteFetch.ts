@@ -849,19 +849,25 @@ export default new Worker("site-fetch", async job => {
           const preferFull = legalWeight(url) >= 90;
           const waitMs = isLegal(url) ? 3000 : undefined;
           const waitFor = isLegal(url) ? 'p span' : undefined;
-          const res = await fetchBeeHtml(url, preferFull, waitMs, waitFor);
-          const eventName = reason === 'crn-site' ? 'Bee fetch (crn-site)' : 'Bee fetch';
-          try {
-            await logEvent(job.id as string, 'info', eventName, {
-              url,
-              status: res.status,
-              bytes: (res.html || '').length,
-              preferFull,
-              waitMs: waitMs || 0,
-              waitFor: waitFor || '',
-              snippet: stripTags(res.html || '').slice(0, 600)
-            });
-          } catch {}
+    const res = await fetchBeeHtml(url, preferFull, waitMs, waitFor);
+    const eventName = reason === 'crn-site' ? 'Bee fetch (crn-site)' : 'Bee fetch';
+    try {
+      await logEvent(job.id as string, 'info', eventName, {
+        url,
+        status: res.status,
+        bytes: (res.html || '').length,
+        preferFull,
+        waitMs: waitMs || 0,
+        waitFor: waitFor || '',
+        snippet: stripTags(res.html || '').slice(0, 600)
+      });
+      await logEvent(job.id as string, 'info', 'Bee fetch completed', {
+        url,
+        status: res.status,
+        reason,
+        bytes: (res.html || '').length
+      });
+    } catch {}
           if (res.status >= 200 && res.status < 400 && (res.html || '').length >= 200) {
             beeCalls += 1;
             const sig = parseHtmlSignals(res.html);
