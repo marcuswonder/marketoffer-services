@@ -164,7 +164,7 @@ function extractLocs(xml: string): string[] {
   return locs;
 }
 
-async function gatherSitemapCandidates(host: string): Promise<string[]> {
+async function gatherSitemapCandidates(host: string, opts: { jobId: string | number; useSerper: boolean }): Promise<{ urls: string[]; source: string }> {
   const discovered = new Set<string>();
   const queue: string[] = [];
   const origins = [`https://${host}`, `http://${host}`];
@@ -180,27 +180,49 @@ async function gatherSitemapCandidates(host: string): Promise<string[]> {
         }
       }
     }
-    if (queue.length) break;
+    if (queue.length) return { urls: queue.slice(0, 10), source: 'robots' };
   }
 
-  if (!queue.length) {
-    const defaults = ['/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml', '/sitemap1.xml', '/sitemap/sitemap.xml'];
-    for (const path of defaults) {
-      const candidate = `https://${host}${path}`;
-      if (!discovered.has(candidate)) {
-        discovered.add(candidate);
-        queue.push(candidate);
+  const defaults = ['/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml', '/sitemap1.xml', '/sitemap/sitemap.xml'];
+  for (const path of defaults) {
+    const candidate = `https://${host}${path}`;
+    if (!discovered.has(candidate)) {
+      discovered.add(candidate);
+      queue.push(candidate);
+    }
+    if (queue.length >= 5) break;
+  }
+  if (queue.length) return { urls: queue.slice(0, 10), source: 'defaults' };
+
+  if (opts.useSerper && SERPER_API_KEY) {
+    const query = `site:${host} filetype:xml`;
+    const data = await serperSearch(query);
+    const items: any[] = Array.isArray(data.data?.organic) ? data.data.organic : [];
+    const xmlLinks = items
+      .map(item => (item?.link || item?.url || '').toString())
+      .filter(link => /\.xml(\?.*)?$/.test(link));
+    for (const link of xmlLinks) {
+      if (!discovered.has(link)) {
+        discovered.add(link);
+        queue.push(link);
       }
       if (queue.length >= 5) break;
     }
+    await logEvent(opts.jobId as string, 'info', 'Serper sitemap search', {
+      query,
+      candidates: queue.length,
+      sample: queue.slice(0, 3)
+    });
+    if (queue.length) return { urls: queue.slice(0, 10), source: 'serper_xml' };
   }
 
-  return queue.slice(0, 10);
+  return { urls: [], source: 'none' };
 }
 
-async function collectSitemapUrls(host: string): Promise<string[]> {
+async function collectSitemapUrls(host: string, opts: { jobId: string | number; useSerper: boolean } ): Promise<{ paths: string[]; source: string }> {
   const visited = new Set<string>();
-  const queue = await gatherSitemapCandidates(host);
+  const gathered = await gatherSitemapCandidates(host, opts);
+  const queue = [...gathered.urls];
   const results = new Set<string>();
   const maxSitemaps = 5;
   const maxUrls = 100;
@@ -236,7 +258,7 @@ async function collectSitemapUrls(host: string): Promise<string[]> {
     }
   }
 
-  return Array.from(results);
+  return { paths: Array.from(results), source: gathered.source };
 }
 
 function filterSitemapPaths(paths: string[]): string[] {
@@ -583,14 +605,42 @@ export default new Worker("site-fetch", async job => {
     let pathSource: string = 'default';
 
     try {
-      const sitemapCandidates = await collectSitemapUrls(host);
-      const filtered = filterSitemapPaths(sitemapCandidates);
+      const sitemapResult = await collectSitemapUrls(host, { jobId: job.id as string, useSerper: true });
+      const filtered = filterSitemapPaths(sitemapResult.paths);
       if (filtered.length) {
         candidatePaths = dedupePaths(['/', ...filtered.slice(0, 50)]);
-        pathSource = 'sitemap';
+        pathSource = `sitemap-${sitemapResult.source}`;
       }
     } catch (e) {
       await logEvent(job.id as string, 'debug', 'Sitemap discovery failed', { host, error: String(e) });
+    }
+
+    if (!candidatePaths.length && SERPER_API_KEY) {
+      try {
+        const query = `site:${host}`;
+        const data = await serperSearch(query);
+        const items: any[] = Array.isArray(data.data?.organic) ? data.data.organic : [];
+        const legalLinks: string[] = [];
+        for (const item of items.slice(0, 20)) {
+          const link = (item?.link || item?.url || '').toString();
+          if (!link) continue;
+          try {
+            const u = new URL(link);
+            if (u.hostname.replace(/^www\./, '') !== host.replace(/^www\./, '')) continue;
+            const path = u.pathname || '/';
+            if (SITEMAP_KEYWORDS.some(k => path.toLowerCase().includes(k)) && legalLinks.length < 30) {
+              legalLinks.push(path);
+            }
+          } catch {}
+        }
+        if (legalLinks.length) {
+          candidatePaths = dedupePaths(['/', ...legalLinks]);
+          pathSource = 'serper_site';
+        }
+        await logEvent(job.id as string, 'info', 'Serper site link discovery', { host, query, collected: legalLinks.length, sample: legalLinks.slice(0, 3) });
+      } catch (e) {
+        await logEvent(job.id as string, 'debug', 'Serper site link failed', { host, error: String(e) });
+      }
     }
 
     if (!candidatePaths.length) {
