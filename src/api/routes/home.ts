@@ -1,0 +1,63 @@
+import { Router } from "express";
+
+export const router = Router();
+
+const page = [
+  "<!doctype html>",
+  '<html lang="en">',
+  '<head>',
+  '  <meta charset="utf-8" />',
+  '  <meta name="viewport" content="width=device-width, initial-scale=1" />',
+  '  <title>MarketOffer Services</title>',
+  '  <meta name="description" content="MarketOffer Services helps estate agents and property investors connect directly with homeowners and company property owners using public data and LinkedIn outreach." />',
+  '  <link rel="apple-touch-icon" sizes="180x180" href="https://marketoffer-public-resources.s3.eu-west-2.amazonaws.com/Favicons/apple-touch-icon.png" />',
+  '  <link rel="icon" type="image/png" sizes="32x32" href="https://marketoffer-public-resources.s3.eu-west-2.amazonaws.com/Favicons/favicon-32x32.png" />',
+  '  <link rel="icon" type="image/png" sizes="16x16" href="https://marketoffer-public-resources.s3.eu-west-2.amazonaws.com/Favicons/favicon-16x16.png" />',
+  '  <link rel="shortcut icon" href="https://marketoffer-public-resources.s3.eu-west-2.amazonaws.com/Favicons/favicon.ico" />',
+  '  <link rel="manifest" href="https://marketoffer-public-resources.s3.eu-west-2.amazonaws.com/Favicons/site.webmanifest" />',
+  '  <style>',
+  '    :root { --bg:#0f172a; --card:#111c32; --text:#f8fafc; --muted:#94a3b8; --accent:#60a5fa; --accent-dark:#2563eb; --border:#1f2937; }',
+  '    * { box-sizing:border-box; }',
+  '    body { margin:0; min-height:100vh; background:radial-gradient(circle at top, rgba(37,99,235,0.25), transparent 45%), var(--bg); font-family: "Inter", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; color:var(--text); display:flex; flex-direction:column; }',
+  '    header { padding:28px 24px 12px; display:flex; justify-content:center; }',
+  '    .logo { height:64px; width:auto; max-width:320px; }',
+  '    main { flex:1; display:flex; align-items:center; justify-content:center; padding:20px; }',
+  '    .hero { max-width:880px; text-align:center; background:rgba(17,24,39,0.75); border:1px solid rgba(148,163,184,0.2); border-radius:24px; padding:48px 32px; box-shadow:0 35px 120px rgba(15,23,42,0.45); backdrop-filter: blur(14px); }',
+  '    .hero h1 { font-size:clamp(2.2rem, 4vw, 3.2rem); margin:0 0 20px; font-weight:700; letter-spacing:-1px; }',
+  '    .hero p { font-size:clamp(1.05rem, 2vw, 1.2rem); line-height:1.7; color:var(--muted); margin:0 auto; max-width:640px; }',
+  '    .cta { margin-top:36px; display:inline-flex; align-items:center; gap:10px; padding:14px 28px; border-radius:999px; background:var(--accent); color:var(--bg); font-weight:600; font-size:1.05rem; text-decoration:none; box-shadow:0 18px 40px rgba(96,165,250,0.35); transition: transform .18s ease, box-shadow .18s ease, background .18s ease; }',
+  '    .cta:hover { transform:translateY(-2px); box-shadow:0 22px 50px rgba(96,165,250,0.4); background:var(--accent-dark); color:#e2e8f0; }',
+  '    .cta svg { width:20px; height:20px; }',
+  '    footer { padding:28px; text-align:center; font-size:0.85rem; color:rgba(148,163,184,0.7); }',
+  '    @media (max-width:640px) {',
+  '      .hero { padding:40px 22px; }',
+  '      header { padding-top:20px; }',
+  '      .logo { height:54px; }',
+  '    }',
+  '  </style>',
+  '</head>',
+  '<body>',
+  '  <header>',
+  '    <img class="logo" src="https://marketoffer-public-resources.s3.eu-west-2.amazonaws.com/MarketOffer+Logo+-+3000px+Width+Transparent.png" alt="MarketOffer Services" />',
+  '  </header>',
+  '  <main>',
+  '    <section class="hero">',
+  '      <h1>MarketOffer Services</h1>',
+  '      <p>We help estate agents and property investors connect directly with homeowners and company property owners using public data and LinkedIn outreach. Our platform identifies high-value prospects through signals like long ownership, expired listings, or poor EPC ratings, then delivers them straight into your pipeline. The result: more qualified conversations, booked calls, and listing opportunities without the wasted spend of traditional lead generation.</p>',
+  '      <a class="cta" href="/admin">',
+  '        <span>Sign In</span>',
+  '        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">',
+  '          <path d="M10 17l5-5-5-5"/>',
+  '          <path d="M4 12h11"/>',
+  '        </svg>',
+  '      </a>',
+  '    </section>',
+  '  </main>',
+  '  <footer>© ' + new Date().getFullYear() + ' MarketOffer. All rights reserved.</footer>',
+  '</body>',
+  '</html>'
+].join('\n');
+
+router.get('/', (_req, res) => {
+  res.type('html').send(page);
+});
