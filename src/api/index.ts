@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { logger } from "../lib/logger.js";
+import { basicAuth } from "./middleware/basic_auth.js";
 import { router as jobsRouter } from "./routes/jobs.js";
 import { router as progressRouter } from "./routes/progress.js";
 import { router as uiRouter } from "./routes/ui.js";
@@ -22,6 +23,8 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req,res)=>res.json({ ok: true }));
+
+app.use(["/api", "/admin"], basicAuth);
 
 app.use("/api", jobsRouter);
 app.use("/api", progressRouter);
