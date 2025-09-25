@@ -38,7 +38,7 @@ const page = [
   '</head>',
   '<body>',
   '  <header>',
-  '    <img class="logo" src="https://marketoffer-public-resources.s3.eu-west-2.amazonaws.com/MarketOffer+Logo+-+3000px+Width+Transparent.png" alt="MarketOffer Services" />',
+  '    <img class="logo" src="https://marketoffer-public-resources.s3.eu-west-2.amazonaws.com/MarketOffer+Logo+-+Blue+and+Black+-+White+Background.png" alt="MarketOffer Services" />',
   '  </header>',
   '  <main>',
   '    <section class="hero">',

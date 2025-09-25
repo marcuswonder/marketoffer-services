@@ -10,6 +10,7 @@ import { router as settingsRouter } from "./routes/settings.js";
 import { router as requestRouter } from "./routes/request.js";
 import { router as settingsUiRouter } from "./routes/settings_ui.js";
 import { router as homeRouter } from "./routes/home.js";
+import { router as adminRouter } from "./routes/admin.js";
 import { ExpressAdapter } from "@bull-board/express";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
 import { createBullBoard } from "@bull-board/api";
@@ -44,6 +45,7 @@ app.use("/admin/requests", requestsUiRouter);
 app.use("/admin/progress", progressUiRouter);
 app.use("/admin/request", requestRouter);
 app.use("/admin/settings", settingsUiRouter);
+app.use("/admin", adminRouter);
 app.use("/", homeRouter);
 
 const port = Number(process.env.PORT || 3000);
