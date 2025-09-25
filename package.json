@@ -12,6 +12,7 @@
     "start": "node dist/api/index.js",
     "worker:ch": "node dist/workers/chAppointments.js",
     "worker:company": "node dist/workers/companyDiscovery.js",
+    "worker:sitefetch": "node dist/workers/siteFetch.js",
     "worker:person": "node dist/workers/personLinkedin.js",
     "seed:hosts": "ts-node --esm scripts/seedGenericHosts.ts airtable_schema/generic_hosts.csv",
     "test:airtable": "ts-node --esm scripts/testAirtable.ts"
