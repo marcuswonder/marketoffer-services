@@ -1,7 +1,8 @@
 import "dotenv/config";
 import express from "express";
+import cookieParser from "cookie-parser";
 import { logger } from "../lib/logger.js";
-import { basicAuth } from "./middleware/basic_auth.js";
+import { basicAuth, handleLogin, handleLogout } from "./middleware/basic_auth.js";
 import { router as jobsRouter } from "./routes/jobs.js";
 import { router as progressRouter } from "./routes/progress.js";
 import { router as uiRouter } from "./routes/ui.js";
@@ -20,9 +21,15 @@ import { initDb } from "../lib/progress.js";
 
 await initDb();
 const app = express();
+const cookieSecret = process.env.COOKIE_SECRET || "";
+app.use(cookieParser(cookieSecret));
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req,res)=>res.json({ ok: true }));
+app.get("/login", handleLogin);
+app.post("/login", handleLogin);
+app.post("/logout", handleLogout);
 
 app.use(["/api", "/admin"], basicAuth);
 
