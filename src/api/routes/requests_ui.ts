@@ -59,8 +59,6 @@ const page = [
   '    </a>',
   '    <a class="btn" data-role="nav-btn" data-target="requests" data-base="/admin/requests" href="/admin/requests">View Requests</a>',
   '    <a class="btn" data-role="nav-btn" data-target="request" data-base="/admin/request" href="/admin/request">New Request</a>',
-  '    <a class="btn" data-role="nav-btn" data-target="progress" data-base="/admin/progress" data-requires-root="1" href="/admin/progress">Progress Summary</a>',
-  '    <a class="btn" data-role="nav-btn" data-target="workflows" data-base="/admin/workflows" data-requires-root="1" href="/admin/workflows">Workflow Detail</a>',
   '  </nav>',
   '  <div class="wrap">',
   '    <div class="hdr">',
