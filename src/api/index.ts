@@ -16,7 +16,7 @@ import { router as adminRouter } from "./routes/admin.js";
 import { ExpressAdapter } from "@bull-board/express";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
 import { createBullBoard } from "@bull-board/api";
-import { chQ, companyQ, personQ, siteFetchQ } from "../queues/index.js";
+import { chQ, companyQ, personQ, siteFetchQ, ownerQ } from "../queues/index.js";
 import { initDb } from "../lib/progress.js";
 
 await initDb();
@@ -46,6 +46,7 @@ createBullBoard({
     new BullMQAdapter(companyQ),
     new BullMQAdapter(personQ),
     new BullMQAdapter(siteFetchQ),
+    new BullMQAdapter(ownerQ),
   ],
   serverAdapter,
 });

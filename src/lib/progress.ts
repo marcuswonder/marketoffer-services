@@ -98,6 +98,78 @@ export async function initDb() {
     ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS sitefetch_job_ids TEXT[];
     ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS person_linkedin_job_ids TEXT[];
     CREATE INDEX IF NOT EXISTS ch_appointments_company_number_idx ON ch_appointments(company_number);
+
+    CREATE TABLE IF NOT EXISTS owner_properties (
+      id BIGSERIAL PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      root_job_id TEXT,
+      address_line1 TEXT NOT NULL,
+      address_line2 TEXT,
+      city TEXT,
+      postcode TEXT NOT NULL,
+      country TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      owner_type TEXT,
+      corporate_owner JSONB,
+      resolution JSONB,
+      candidate_summary JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(job_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS owner_candidates (
+      id BIGSERIAL PRIMARY KEY,
+      property_id BIGINT NOT NULL REFERENCES owner_properties(id) ON DELETE CASCADE,
+      full_name TEXT NOT NULL,
+      first_name TEXT,
+      last_name TEXT,
+      score NUMERIC(6,4),
+      rank INTEGER,
+      sources TEXT[],
+      evidence JSONB,
+      outcome TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS owner_signals (
+      id BIGSERIAL PRIMARY KEY,
+      candidate_id BIGINT NOT NULL REFERENCES owner_candidates(id) ON DELETE CASCADE,
+      signal_id TEXT NOT NULL,
+      label TEXT,
+      weight NUMERIC(6,4),
+      value NUMERIC(6,4),
+      score NUMERIC(6,4),
+      reason TEXT,
+      evidence JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS owner_properties_job_idx ON owner_properties(job_id);
+    CREATE INDEX IF NOT EXISTS owner_candidates_property_id_idx ON owner_candidates(property_id);
+
+    CREATE TABLE IF NOT EXISTS land_registry_corporate (
+      address_key TEXT PRIMARY KEY,
+      owner_name TEXT NOT NULL,
+      company_number TEXT,
+      dataset_label TEXT,
+      raw JSONB
+    );
+
+    CREATE TABLE IF NOT EXISTS land_registry_corporate_meta (
+      dataset_label TEXT PRIMARY KEY,
+      last_refreshed_at TIMESTAMPTZ,
+      source_url TEXT,
+      row_count INTEGER
+    );
+
+    ALTER TABLE land_registry_corporate_meta ADD COLUMN IF NOT EXISTS dataset_label TEXT;
+    ALTER TABLE land_registry_corporate_meta ADD COLUMN IF NOT EXISTS last_refreshed_at TIMESTAMPTZ;
+    ALTER TABLE land_registry_corporate_meta ADD COLUMN IF NOT EXISTS source_url TEXT;
+    ALTER TABLE land_registry_corporate_meta ADD COLUMN IF NOT EXISTS row_count INTEGER;
+    UPDATE land_registry_corporate_meta SET dataset_label = COALESCE(dataset_label, 'legacy');
+    CREATE UNIQUE INDEX IF NOT EXISTS land_registry_corporate_meta_label_idx ON land_registry_corporate_meta(dataset_label);
   `);
 }
 

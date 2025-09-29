@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
-import { chQ, companyQ, personQ } from "../../queues/index.js";
+import { chQ, companyQ, personQ, ownerQ } from "../../queues/index.js";
+import { addressKey } from "../../lib/address.js";
 
 export const router = Router();
 
@@ -80,5 +81,33 @@ router.post("/jobs/person-linkedin", async (req, res) => {
     jobId = byPayload.data.jobId || `person:${Date.now()}`;
   }
   await personQ.add("discover", data, { jobId, attempts: 5, backoff: { type: "exponential", delay: 2000 } });
+  res.json({ jobId });
+});
+
+router.post("/jobs/owner-discovery", async (req, res) => {
+  const schema = z.object({
+    address: z.object({
+      line1: z.string().min(1),
+      line2: z.string().optional(),
+      city: z.string().optional(),
+      postcode: z.string().min(3),
+      country: z.string().optional(),
+    }),
+    rootJobId: z.string().optional(),
+    metadata: z.record(z.any()).optional(),
+    allowCorporateQueue: z.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_request', issues: parsed.error.issues });
+  }
+  const data = parsed.data;
+  const key = addressKey(data.address);
+  const jobId = `owner:${key || `${Date.now()}`}`;
+  await ownerQ.add(
+    'discover',
+    data,
+    { jobId, attempts: 5, backoff: { type: 'exponential', delay: 1500 } }
+  );
   res.json({ jobId });
 });
