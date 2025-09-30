@@ -41,39 +41,6 @@ function mergeName(first: string, last: string): string {
 
 export async function lookupOpenRegister(address: AddressInput): Promise<OpenRegisterResult | null> {
   const pretty = prettyAddress(address);
-  // const cacheDir = process.env.OWNER_OPEN_REGISTER_CACHE;
-  // if (cacheDir) {
-  //   try {
-  //     const key = addressKey(address) || normalizePostcode(address.postcode);
-  //     if (key) {
-  //       const filePath = path.isAbsolute(cacheDir) ? path.join(cacheDir, `${key}.json`) : path.join(process.cwd(), cacheDir, `${key}.json`);
-  //       if (fs.existsSync(filePath)) {
-  //         const txt = fs.readFileSync(filePath, 'utf-8');
-  //         const raw = JSON.parse(txt);
-  //         const occupants: OccupantRecord[] = Array.isArray(raw?.occupants)
-  //           ? raw.occupants.map((rec: any) => ({
-  //               firstName: rec.firstName || rec.first_name || '',
-  //               lastName: rec.lastName || rec.last_name || '',
-  //               fullName: rec.fullName || rec.full_name || mergeName(rec.firstName || rec.first_name, rec.lastName || rec.last_name),
-  //               ageBand: rec.ageBand || rec.age_band,
-  //               birthYear: rec.birthYear || rec.birth_year,
-  //               firstSeenYear: rec.firstSeenYear || rec.first_seen_year,
-  //               lastSeenYear: rec.lastSeenYear || rec.last_seen_year,
-  //               dataSources: Array.isArray(rec.dataSources) ? rec.dataSources : Array.isArray(rec.data_sources) ? rec.data_sources : [],
-  //               indicators: Array.isArray(rec.indicators) ? rec.indicators : [],
-  //             }))
-  //           : [];
-  //         return {
-  //           occupants,
-  //           raw,
-  //           source: raw?.source || 'open_register_cache',
-  //         };
-  //       }
-  //     }
-  //   } catch (err) {
-  //     logger.warn({ address: pretty, err: String(err) }, 'Failed to read open register cache');
-  //   }
-  // }
 
   const apiKey = process.env.T2A_API_KEY;
   const apiBase = process.env.T2A_BASE_URL || 'https://api.t2a.io/rest/rest.aspx';
