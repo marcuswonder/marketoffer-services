@@ -10,6 +10,10 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV}
       PORT: ${PORT}
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASS: ${ADMIN_PASS}
+      COOKIE_SECRET: ${COOKIE_SECRET}
+
       # DB
       DATABASE_URL: ${DATABASE_URL}
       POSTGRES_HOST: ${POSTGRES_HOST}
