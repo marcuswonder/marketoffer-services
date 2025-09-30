@@ -1,5 +1,23 @@
 import pino from "pino";
-export const logger = pino({
-  level: process.env.NODE_ENV === "production" ? "info" : "debug",
-  transport: process.env.NODE_ENV === "production" ? undefined : { target: "pino-pretty" }
-});
+import { createRequire } from "module";
+
+const env = process.env.NODE_ENV || "development";
+const level = process.env.LOG_LEVEL || (env === "production" ? "info" : "debug");
+
+let transport: any;
+if (env !== "production") {
+  try {
+    const require = createRequire(import.meta.url);
+    require.resolve("pino-pretty");
+    transport = {
+      target: "pino-pretty",
+      options: {
+        colorize: true,
+      },
+    };
+  } catch {
+    transport = undefined;
+  }
+}
+
+export const logger = pino({ level, transport });
