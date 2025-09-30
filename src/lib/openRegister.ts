@@ -41,78 +41,167 @@ function mergeName(first: string, last: string): string {
 
 export async function lookupOpenRegister(address: AddressInput): Promise<OpenRegisterResult | null> {
   const pretty = prettyAddress(address);
-  const cacheDir = process.env.OWNER_OPEN_REGISTER_CACHE;
-  if (cacheDir) {
-    try {
-      const key = addressKey(address) || normalizePostcode(address.postcode);
-      if (key) {
-        const filePath = path.isAbsolute(cacheDir) ? path.join(cacheDir, `${key}.json`) : path.join(process.cwd(), cacheDir, `${key}.json`);
-        if (fs.existsSync(filePath)) {
-          const txt = fs.readFileSync(filePath, 'utf-8');
-          const raw = JSON.parse(txt);
-          const occupants: OccupantRecord[] = Array.isArray(raw?.occupants)
-            ? raw.occupants.map((rec: any) => ({
-                firstName: rec.firstName || rec.first_name || '',
-                lastName: rec.lastName || rec.last_name || '',
-                fullName: rec.fullName || rec.full_name || mergeName(rec.firstName || rec.first_name, rec.lastName || rec.last_name),
-                ageBand: rec.ageBand || rec.age_band,
-                birthYear: rec.birthYear || rec.birth_year,
-                firstSeenYear: rec.firstSeenYear || rec.first_seen_year,
-                lastSeenYear: rec.lastSeenYear || rec.last_seen_year,
-                dataSources: Array.isArray(rec.dataSources) ? rec.dataSources : Array.isArray(rec.data_sources) ? rec.data_sources : [],
-                indicators: Array.isArray(rec.indicators) ? rec.indicators : [],
-              }))
-            : [];
-          return {
-            occupants,
-            raw,
-            source: raw?.source || 'open_register_cache',
-          };
-        }
-      }
-    } catch (err) {
-      logger.warn({ address: pretty, err: String(err) }, 'Failed to read open register cache');
-    }
-  }
+  // const cacheDir = process.env.OWNER_OPEN_REGISTER_CACHE;
+  // if (cacheDir) {
+  //   try {
+  //     const key = addressKey(address) || normalizePostcode(address.postcode);
+  //     if (key) {
+  //       const filePath = path.isAbsolute(cacheDir) ? path.join(cacheDir, `${key}.json`) : path.join(process.cwd(), cacheDir, `${key}.json`);
+  //       if (fs.existsSync(filePath)) {
+  //         const txt = fs.readFileSync(filePath, 'utf-8');
+  //         const raw = JSON.parse(txt);
+  //         const occupants: OccupantRecord[] = Array.isArray(raw?.occupants)
+  //           ? raw.occupants.map((rec: any) => ({
+  //               firstName: rec.firstName || rec.first_name || '',
+  //               lastName: rec.lastName || rec.last_name || '',
+  //               fullName: rec.fullName || rec.full_name || mergeName(rec.firstName || rec.first_name, rec.lastName || rec.last_name),
+  //               ageBand: rec.ageBand || rec.age_band,
+  //               birthYear: rec.birthYear || rec.birth_year,
+  //               firstSeenYear: rec.firstSeenYear || rec.first_seen_year,
+  //               lastSeenYear: rec.lastSeenYear || rec.last_seen_year,
+  //               dataSources: Array.isArray(rec.dataSources) ? rec.dataSources : Array.isArray(rec.data_sources) ? rec.data_sources : [],
+  //               indicators: Array.isArray(rec.indicators) ? rec.indicators : [],
+  //             }))
+  //           : [];
+  //         return {
+  //           occupants,
+  //           raw,
+  //           source: raw?.source || 'open_register_cache',
+  //         };
+  //       }
+  //     }
+  //   } catch (err) {
+  //     logger.warn({ address: pretty, err: String(err) }, 'Failed to read open register cache');
+  //   }
+  // }
 
   const apiKey = process.env.T2A_API_KEY;
-  const apiBase = process.env.T2A_BASE_URL || 'https://api.t2a.io/v1';
+  const apiBase = process.env.T2A_BASE_URL || 'https://api.t2a.io/rest/rest.aspx';
   if (apiKey) {
     try {
-      const url = new URL('/person/address', apiBase);
-      url.searchParams.set('address', pretty);
+      const premisesParts = [address.line1, address.line2].map(s => (s || '').trim()).filter(Boolean);
+      const premises = premisesParts.join(' ');
+      const url = new URL(apiBase);
+      url.searchParams.set('method', 'address_person');
+      url.searchParams.set('api_key', apiKey);
+      if (premises) url.searchParams.set('premises', premises);
+      if (address.postcode) url.searchParams.set('postcode', address.postcode.trim());
+      if (address.city) url.searchParams.set('town', address.city.trim());
+      url.searchParams.set('output', 'json');
+
       const res = await fetch(url.toString(), {
-        headers: {
-          'X-API-KEY': apiKey,
-          Accept: 'application/json',
-        },
+        method: 'GET',
+        headers: { Accept: 'application/json' },
       });
-      if (res.ok) {
+      if (!res.ok) {
+        logger.warn({ status: res.status, address: pretty }, 'Open register API request failed');
+      } else {
         const json: any = await res.json();
-        const data: any[] = Array.isArray(json?.items) ? json.items : [];
-        const mapped: OccupantRecord[] = data.map((item: any) => {
-          const sources: string[] = [];
-          if (Array.isArray(item.sources)) {
-            for (const src of item.sources) {
-              if (src?.code) sources.push(String(src.code));
+        if (json?.status && typeof json.status === 'string' && json.status.toLowerCase() === 'error') {
+          logger.warn({ address: pretty, code: json.error_code || json.error, message: json.message || json.error_message || null }, 'Open register API returned error status');
+        } else {
+          const personList = Array.isArray(json?.person_list) ? json.person_list : [];
+          const premisesList = Array.isArray(json?.premises_list) ? json.premises_list : [];
+
+          const records: OccupantRecord[] = [];
+
+          const toYear = (value: any): number | undefined => {
+            const n = Number(value);
+            return Number.isFinite(n) ? n : undefined;
+          };
+
+          const dedupeStrings = (values: any[]): string[] => {
+            const seen = new Set<string>();
+            const out: string[] = [];
+            for (const val of values || []) {
+              if (val == null) continue;
+              const str = String(val).trim();
+              if (!str) continue;
+              if (seen.has(str.toLowerCase())) continue;
+              seen.add(str.toLowerCase());
+              out.push(str);
             }
+            return out;
+          };
+
+          const addFromPerson = (item: any) => {
+            if (!item || typeof item !== 'object') return;
+            const firstName = String(item.first_name || item.firstname || '').trim();
+            const lastName = String(item.last_name || item.lastname || '').trim();
+            const fullName = String(item.full_name || item.fullname || mergeName(firstName, lastName)).trim();
+            const years = Array.isArray(item.years_list)
+              ? (item.years_list as any[])
+                  .map(toYear)
+                  .filter((value: number | undefined): value is number => typeof value === 'number' && Number.isFinite(value))
+              : [];
+            const sources = dedupeStrings([
+              ...(Array.isArray(item.data_sources) ? item.data_sources : []),
+              ...(Array.isArray(item.sources) ? item.sources : []),
+              item.source,
+            ]);
+            const indicators = dedupeStrings([
+              ...(Array.isArray(item.flags) ? item.flags : []),
+              ...(Array.isArray(item.indicators) ? item.indicators : []),
+            ]);
+            records.push({
+              firstName,
+              lastName,
+              fullName: fullName || mergeName(firstName, lastName),
+              ageBand: String(item.age_band || item.ageBand || '').trim() || undefined,
+              birthYear: toYear(item.year_of_birth || item.birth_year || item.dob_year),
+              firstSeenYear: years.length ? Math.min(...years) : undefined,
+              lastSeenYear: years.length ? Math.max(...years) : undefined,
+              dataSources: sources,
+              indicators,
+            });
+          };
+
+          const addFromPremises = (item: any) => {
+            if (!item || typeof item !== 'object') return;
+            const name = String(item.occupant_name || item.name || item.full_name || '').trim();
+            if (!name) return;
+            const parts = name.split(/\s+/).filter(Boolean);
+            const firstName = parts[0] || '';
+            const lastName = parts.length > 1 ? parts.slice(1).join(' ') : '';
+            const years = Array.isArray(item.years_list)
+              ? (item.years_list as any[])
+                  .map(toYear)
+                  .filter((value: number | undefined): value is number => typeof value === 'number' && Number.isFinite(value))
+              : [];
+            const sources = dedupeStrings([
+              ...(Array.isArray(item.data_sources) ? item.data_sources : []),
+              ...(Array.isArray(item.sources) ? item.sources : []),
+              item.source,
+            ]);
+            const indicators = dedupeStrings([
+              ...(Array.isArray(item.flags) ? item.flags : []),
+              ...(Array.isArray(item.indicators) ? item.indicators : []),
+            ]);
+            records.push({
+              firstName,
+              lastName,
+              fullName: name,
+              ageBand: undefined,
+              birthYear: undefined,
+              firstSeenYear: years.length ? Math.min(...years) : undefined,
+              lastSeenYear: years.length ? Math.max(...years) : undefined,
+              dataSources: sources,
+              indicators,
+            });
+          };
+
+          personList.forEach(addFromPerson);
+          premisesList.forEach(addFromPremises);
+
+          const cleaned = dedupe<OccupantRecord>(
+            records,
+            (occ) => occ.fullName.toLowerCase() || `${(occ.firstName || '').toLowerCase()} ${(occ.lastName || '').toLowerCase()}`.trim()
+          );
+          if (cleaned.length) {
+            return { occupants: cleaned, raw: json, source: 't2a_address_person' };
           }
-          return {
-            firstName: item.firstName || item.first_name || '',
-            lastName: item.lastName || item.last_name || '',
-            fullName: mergeName(item.firstName || item.first_name, item.lastName || item.last_name),
-            ageBand: item.ageBand || item.age_band,
-            birthYear: item.yearOfBirth || item.birthYear || item.birth_year,
-            firstSeenYear: item.firstSeen || item.first_seen,
-            lastSeenYear: item.lastSeen || item.last_seen,
-            dataSources: sources,
-            indicators: Array.isArray(item.indicators) ? item.indicators : [],
-          } as OccupantRecord;
-        });
-        const cleaned = dedupe<OccupantRecord>(mapped, (occ) => occ.fullName.toLowerCase());
-        return { occupants: cleaned, raw: json, source: 't2a_open_register' };
+        }
       }
-      logger.warn({ status: res.status, address: pretty }, 'Open register API request failed');
     } catch (err) {
       logger.warn({ address: pretty, err: String(err) }, 'Open register API lookup failed');
     }
