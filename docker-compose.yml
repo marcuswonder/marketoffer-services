@@ -139,6 +139,8 @@ services:
       LAND_REGISTRY_INTL_CORPORATE_DATASET: ${LAND_REGISTRY_INTL_CORPORATE_DATASET}
       T2A_API_KEY: ${T2A_API_KEY}
       T2A_BASE_URL: ${T2A_BASE_URL}
+      CH_API_BASE: ${CH_API_BASE}
+      CH_API_KEY: ${CH_API_KEY}
   redis:
     image: redis:7-alpine
     ports:
