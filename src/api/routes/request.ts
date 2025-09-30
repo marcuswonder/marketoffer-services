@@ -120,7 +120,7 @@ const page = [
   '  </div>',
   '  <script>',
   '    const params = new URLSearchParams(window.location.search);',
-  "    const currentFlow = (params.get('flow') || 'director').toLowerCase() === 'owner' ? 'owner' : 'director';",
+  "    let currentFlow = (params.get('flow') || 'director').toLowerCase() === 'owner' ? 'owner' : 'director';",
   "    const navButtons = Array.from(document.querySelectorAll('[data-role=\"nav-btn\"]'));",
   '    const navCurrent = document.querySelector(".nav")?.dataset.current || "";',
   '    const flowLinks = Array.from(document.querySelectorAll("[data-flow-link]"));',
