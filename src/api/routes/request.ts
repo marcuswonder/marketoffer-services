@@ -256,7 +256,7 @@ const page = [
   '          return;',
   '        }',
   '        try {',
-  '          const payload: any = { address };',
+  '          const payload = { address };',
   '          const res = await fetch("/api/jobs/owner-discovery", {',
   '            method: "POST",',
   '            headers: { "Content-Type": "application/json" },',
