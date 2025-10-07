@@ -10,3 +10,6 @@ npm-debug.log*
 # OS / IDE
 .DS_Store
 .vscode
+
+# Reference
+/reference/
