@@ -62,7 +62,7 @@ async function downloadFile(url: string, cfg: DatasetConfig): Promise<string> {
 
 async function extractZip(zipPath: string): Promise<string> {
   const directory = await unzipper.Open.file(zipPath);
-  const csvEntry = directory.files.find(file => file.path.toLowerCase().endsWith('.csv'));
+  const csvEntry = directory.files.find((file: any) => file.path.toLowerCase().endsWith('.csv'));
   if (!csvEntry) {
     throw new Error(`Zip ${zipPath} does not contain a CSV file`);
   }
@@ -138,6 +138,9 @@ async function run() {
 }
 
 run().catch(err => {
-  console.error(err);
+  console.error(
+    'Land Registry update failed:',
+    err instanceof Error ? err.stack : JSON.stringify(err)
+  );
   process.exit(1);
 });
