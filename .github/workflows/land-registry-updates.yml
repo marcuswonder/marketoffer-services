@@ -1,0 +1,18 @@
+name: Land Registry Updates
+on:
+  schedule:
+    - cron: '0 3 1 * *'
+jobs:
+  run-updates:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      LAND_REGISTRY_API_KEY: ${{ secrets.LAND_REGISTRY_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm install unzipper
+      - run: node --loader ts-node/esm scripts/run_land_registry_updates.ts
