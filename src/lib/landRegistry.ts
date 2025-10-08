@@ -56,6 +56,32 @@ const API_SEARCH_BASES = [
 let datasetCache: Map<string, CorporateOwnerRecord> | null = null;
 let datasetCacheLoaded = false;
 
+export async function searchCorporateOwnersByPostcode(postcode: string): Promise<CorporateOwnerRecord[]> {
+  const normalized = normalizePostcode(postcode);
+  if (!normalized) return [];
+  const suffix = normalized.toLowerCase();
+  const { rows } = await query<{
+    address_key: string;
+    owner_name: string;
+    company_number: string | null;
+    dataset_label: string | null;
+    raw: any;
+  }>(
+    `SELECT address_key, owner_name, company_number, dataset_label, raw
+       FROM land_registry_corporate
+       WHERE address_key LIKE $1
+       ORDER BY owner_name`,
+    [`%|${suffix}`]
+  );
+  return rows.map((row) => ({
+    ownerName: row.owner_name,
+    companyNumber: row.company_number || undefined,
+    addressKey: row.address_key,
+    raw: row.raw,
+    datasetLabel: row.dataset_label || undefined,
+  }));
+}
+
 function isUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
 }

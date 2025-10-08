@@ -4,7 +4,8 @@ import { connection, chQ } from '../queues/index.js';
 import { initDb, startJob, logEvent, completeJob, failJob } from '../lib/progress.js';
 import { query } from '../lib/db.js';
 import { AddressInput, prettyAddress, addressKey } from '../lib/address.js';
-import { findCorporateOwner } from '../lib/landRegistry.js';
+import { findCorporateOwner, searchCorporateOwnersByPostcode } from '../lib/landRegistry.js';
+import type { CorporateOwnerRecord, CorporateOwnerMatch } from '../lib/landRegistry.js';
 import { lookupOpenRegister } from '../lib/openRegister.js';
 import { scoreOccupants } from '../lib/homeownerRubric.js';
 import { searchCompaniesByAddress, searchOfficersByAddress, summarizeCompany, summarizeOfficer } from '../lib/companiesHouseSearch.js';
@@ -60,6 +61,118 @@ async function clearCandidates(propertyId: number) {
   await query(`DELETE FROM owner_candidates WHERE property_id = $1`, [propertyId]);
 }
 
+function normalizeForMatch(input: string): string {
+  return (input || '')
+    .toLowerCase()
+    .replace(/\(.*?\)/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokens(value: string): string[] {
+  return normalizeForMatch(value).split(' ').filter(Boolean);
+}
+
+function buildTargetVariants(address: AddressInput): string[] {
+  const variants = new Set<string>();
+  const lines = [address.line1, address.line2].filter(Boolean) as string[];
+  if (lines.length) variants.add(lines.join(' '));
+  if (lines.length > 1) variants.add([...lines].reverse().join(' '));
+  variants.add(address.line1);
+  if (address.line2) variants.add(address.line2);
+  if (address.city) {
+    variants.add(`${address.line1} ${address.city}`);
+    if (lines.length) variants.add(`${lines.join(' ')} ${address.city}`);
+  }
+  return Array.from(variants)
+    .map(normalizeForMatch)
+    .filter((value) => value.length > 2);
+}
+
+function extractCandidateVariants(record: CorporateOwnerRecord): Array<{ raw: string; normalized: string }> {
+  const variants = new Set<string>();
+  const keyPrefix = record.addressKey?.split('|')[0] || '';
+  if (keyPrefix) variants.add(keyPrefix);
+
+  const raw = record.raw || {};
+  const propertyAddress = raw?.property_address || raw?.propertyAddress || raw?.address || raw?.Property_Address;
+  if (typeof propertyAddress === 'string' && propertyAddress) {
+    variants.add(propertyAddress);
+    propertyAddress.split(',').forEach((part: string) => variants.add(part));
+  }
+
+  const addressLines = Array.isArray(raw?.proprietor?.address_lines) ? raw.proprietor.address_lines : [];
+  addressLines.forEach((line: any) => {
+    if (typeof line === 'string' && line.trim()) variants.add(line);
+  });
+
+  return Array.from(variants)
+    .map((value) => ({
+      raw: value,
+      normalized: normalizeForMatch(value),
+    }))
+    .filter((entry) => entry.normalized.length > 2);
+}
+
+function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: AddressInput) {
+  const targetVariants = buildTargetVariants(address).map((value) => ({
+    raw: value,
+    tokens: new Set(tokens(value)),
+  }));
+  if (!targetVariants.length) return null;
+
+  type MatchResult = {
+    record: CorporateOwnerRecord;
+    extraTokens: number;
+    targetSize: number;
+    targetVariant: string;
+    candidateVariant: string;
+  };
+
+  let best: MatchResult | null = null;
+
+  for (const record of candidates) {
+    const candidateVariants = extractCandidateVariants(record).map((entry) => ({
+      raw: entry.raw,
+      normalized: entry.normalized,
+      tokens: new Set(tokens(entry.normalized)),
+    }));
+    if (!candidateVariants.length) continue;
+
+    for (const candidate of candidateVariants) {
+      if (!candidate.tokens.size) continue;
+      for (const target of targetVariants) {
+        if (!target.tokens.size) continue;
+        let missing = 0;
+        for (const token of target.tokens) {
+          if (!candidate.tokens.has(token)) {
+            missing = 1;
+            break;
+          }
+        }
+        if (missing) continue;
+        const extraTokens = candidate.tokens.size - target.tokens.size;
+        if (
+          !best ||
+          extraTokens < best.extraTokens ||
+          (extraTokens === best.extraTokens && target.tokens.size > best.targetSize)
+        ) {
+          best = {
+            record,
+            extraTokens,
+            targetSize: target.tokens.size,
+            targetVariant: target.raw,
+            candidateVariant: candidate.raw,
+          };
+        }
+      }
+    }
+  }
+
+  return best;
+}
+
 export default new Worker<OwnerDiscoveryJob>(
   'owner-discovery',
   async (job) => {
@@ -86,7 +199,59 @@ export default new Worker<OwnerDiscoveryJob>(
       }
 
       // Step 1: Land Registry corporate ownership check
-      const corporate = await findCorporateOwner(address);
+      let corporate: CorporateOwnerMatch | null = null;
+      const postcodeHits = await searchCorporateOwnersByPostcode(address.postcode);
+      if (postcodeHits.length) {
+        const best = chooseCorporateMatch(postcodeHits, address);
+        await logEvent(jobId, 'info', 'Corporate postcode search', {
+          postcode: address.postcode,
+          hitCount: postcodeHits.length,
+          hits: postcodeHits.slice(0, 8).map((hit) => ({
+            ownerName: hit.ownerName,
+            companyNumber: hit.companyNumber || null,
+            addressKey: hit.addressKey,
+            propertyAddress:
+              typeof hit.raw?.property_address === 'string'
+                ? hit.raw.property_address
+                : hit.raw?.propertyAddress || null,
+          })),
+          matched: best
+            ? {
+                ownerName: best.record.ownerName,
+                companyNumber: best.record.companyNumber || null,
+                addressKey: best.record.addressKey,
+                datasetLabel: best.record.datasetLabel || null,
+                targetVariant: best.targetVariant,
+                candidateVariant: best.candidateVariant,
+                extraTokens: best.extraTokens,
+              }
+            : null,
+        });
+        if (best) {
+          corporate = {
+            matchType: best.extraTokens === 0 ? 'exact' : 'postcode',
+            ownerName: best.record.ownerName,
+            companyNumber: best.record.companyNumber,
+            source: best.record.datasetLabel || 'land_registry_dataset',
+            raw: best.record.raw,
+          };
+        } else {
+          await logEvent(jobId, 'info', 'Corporate postcode match not found', {
+            postcode: address.postcode,
+            hitCount: postcodeHits.length,
+          });
+        }
+      } else {
+        await logEvent(jobId, 'info', 'Corporate postcode search', {
+          postcode: address.postcode,
+          hitCount: 0,
+        });
+      }
+
+      if (!corporate && postcodeHits.length === 0) {
+        corporate = await findCorporateOwner(address);
+      }
+
       if (corporate) {
         await query(
           `UPDATE owner_properties SET owner_type = 'company', status = 'corporate', corporate_owner = $2, updated_at = now()
