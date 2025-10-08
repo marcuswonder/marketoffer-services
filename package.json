@@ -9,20 +9,15 @@
     "dev:worker:company": "nodemon --watch src --exec ts-node src/workers/companyDiscovery.ts",
     "dev:worker:person": "nodemon --watch src --exec ts-node src/workers/personLinkedin.ts",
     "dev:worker:owner": "nodemon --watch src --exec ts-node src/workers/ownerDiscovery.ts",
-    "build": "tsc -p .",
+    "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true });\" && tsc -p tsconfig.json && tsc -p tsconfig.scripts.json",
     "start": "node dist/api/index.js",
-    "preworker:ch": "npm run build",
     "worker:ch": "node dist/workers/chAppointments.js",
-    "preworker:company": "npm run build",
     "worker:company": "node dist/workers/companyDiscovery.js",
-    "preworker:sitefetch": "npm run build",
     "worker:sitefetch": "node dist/workers/siteFetch.js",
-    "preworker:person": "npm run build",
     "worker:person": "node dist/workers/personLinkedin.js",
-    "preworker:owner": "npm run build",
     "worker:owner": "node dist/workers/ownerDiscovery.js",
-    "seed:hosts": "ts-node --esm scripts/seedGenericHosts.ts airtable_schema/generic_hosts.csv",
-    "test:airtable": "ts-node --esm scripts/testAirtable.ts"
+    "seed:hosts": "ts-node --project tsconfig.scripts.json --esm scripts/seedGenericHosts.ts airtable_schema/generic_hosts.csv",
+    "test:airtable": "ts-node --project tsconfig.scripts.json --esm scripts/testAirtable.ts"
   },
   "dependencies": {
     "@bull-board/api": "^6.5.4",
