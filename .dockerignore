@@ -15,3 +15,6 @@ scripts
 
 # Build output
 dist
+
+# Reference
+/reference/
