@@ -93,9 +93,27 @@ export async function lookupOpenRegister(address: AddressInput): Promise<OpenReg
 
           const addFromPerson = (item: any) => {
             if (!item || typeof item !== 'object') return;
-            const firstName = String(item.first_name || item.firstname || '').trim();
-            const lastName = String(item.last_name || item.lastname || '').trim();
-            const fullName = String(item.full_name || item.fullname || mergeName(firstName, lastName)).trim();
+            const firstName = String(
+              item.first_name ||
+                item.firstname ||
+                item.forename ||
+                item.forename1 ||
+                item.given_name ||
+                ''
+            ).trim();
+            const lastName = String(
+              item.last_name ||
+                item.lastname ||
+                item.surname ||
+                item.family_name ||
+                ''
+            ).trim();
+            const fullName = String(
+              item.full_name ||
+                item.fullname ||
+                item.name_single_line ||
+                mergeName(firstName, lastName)
+            ).trim();
             const years = Array.isArray(item.years_list)
               ? (item.years_list as any[])
                   .map(toYear)
