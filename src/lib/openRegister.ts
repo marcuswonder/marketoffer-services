@@ -165,8 +165,26 @@ export async function lookupOpenRegister(address: AddressInput): Promise<OpenReg
             (occ) => occ.fullName.toLowerCase() || `${(occ.firstName || '').toLowerCase()} ${(occ.lastName || '').toLowerCase()}`.trim()
           );
           if (cleaned.length) {
+            try {
+              logger.info(
+                {
+                  address: pretty,
+                  source: 't2a_address_person',
+                  occupantCount: cleaned.length,
+                  sample: cleaned.slice(0, 5).map((occ) => ({
+                    fullName: occ.fullName,
+                    firstSeenYear: occ.firstSeenYear,
+                    lastSeenYear: occ.lastSeenYear,
+                    dataSources: occ.dataSources,
+                    indicators: occ.indicators,
+                  })),
+                },
+                'Open register occupants found'
+              );
+            } catch {}
             return { occupants: cleaned, raw: json, source: 't2a_address_person' };
           }
+          logger.info({ address: pretty, source: 't2a_address_person', occupantCount: 0 }, 'Open register returned no occupants');
         }
       }
     } catch (err) {
