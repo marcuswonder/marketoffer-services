@@ -7,8 +7,19 @@ import { AddressInput, prettyAddress, addressKey } from '../lib/address.js';
 import { findCorporateOwner, searchCorporateOwnersByPostcode } from '../lib/landRegistry.js';
 import type { CorporateOwnerRecord, CorporateOwnerMatch } from '../lib/landRegistry.js';
 import { lookupOpenRegister } from '../lib/openRegister.js';
+import type { OccupantRecord } from '../lib/openRegister.js';
 import { scoreOccupants } from '../lib/homeownerRubric.js';
-import { searchCompaniesByAddress, searchOfficersByAddress, summarizeCompany, summarizeOfficer } from '../lib/companiesHouseSearch.js';
+import {
+  searchCompaniesByAddress,
+  searchOfficersByAddress,
+  summarizeCompany,
+  summarizeOfficer,
+  listCompanyDirectors,
+  listCompanyPscs,
+  type CompanyAddressHit,
+  type CompanyOfficerRecord,
+  type CompanyPscRecord,
+} from '../lib/companiesHouseSearch.js';
 import { parseOfficerName } from '../lib/normalize.js';
 
 await initDb();
@@ -173,6 +184,44 @@ function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: Addre
   return best;
 }
 
+function occupantRecordKey(rec: OccupantRecord): string {
+  const name = rec.fullName || `${rec.firstName || ''} ${rec.lastName || ''}`;
+  return normalizeName(name);
+}
+
+function occupantFromCompanyPerson(
+  name: string,
+  opts: {
+    source: 'director' | 'psc';
+    company: CompanyAddressHit;
+    officer?: CompanyOfficerRecord;
+    psc?: CompanyPscRecord;
+  }
+): OccupantRecord | null {
+  if (!name?.trim()) return null;
+  const parsed = parseOfficerName(name);
+  const fullName = [parsed.first, parsed.middle, parsed.last].filter(Boolean).join(' ').trim() || name.trim();
+  const appointedYear = opts.officer?.appointedOn?.slice(0, 4);
+  const firstSeenYear = appointedYear && /^\d{4}$/.test(appointedYear) ? Number(appointedYear) : undefined;
+  const dataSource = opts.source === 'director' ? 'companies_house_director' : 'companies_house_psc';
+  const indicators = ['companies_house'];
+  const sources = [dataSource];
+  if (opts.company.companyNumber) {
+    sources.push(`ch_company_${opts.company.companyNumber}`);
+  }
+  return {
+    firstName: parsed.first || '',
+    lastName: parsed.last || '',
+    fullName,
+    ageBand: undefined,
+    birthYear: undefined,
+    firstSeenYear,
+    lastSeenYear: undefined,
+    dataSources: Array.from(new Set(sources)),
+    indicators,
+  };
+}
+
 export default new Worker<OwnerDiscoveryJob>(
   'owner-discovery',
   async (job) => {
@@ -281,16 +330,21 @@ export default new Worker<OwnerDiscoveryJob>(
 
       // Step 2: Open register lookup
       const register = await lookupOpenRegister(address);
-      const occupants = register?.occupants || [];
+      const openRegisterOccupants = register?.occupants || [];
       await logEvent(jobId, 'info', 'Open register results', {
-        count: occupants.length,
+        count: openRegisterOccupants.length,
         source: register?.source || null,
       });
-      if (rootJobId && occupants.length) {
+      if (rootJobId && openRegisterOccupants.length) {
         await logEvent(rootJobId, 'info', 'Occupants located', {
           childJobId: jobId,
-          count: occupants.length,
+          count: openRegisterOccupants.length,
         });
+      }
+
+      const occupantMap = new Map<string, OccupantRecord>();
+      for (const occ of openRegisterOccupants) {
+        occupantMap.set(occupantRecordKey(occ), occ);
       }
 
       // Step 4: Companies House search (done before scoring to feed rubric)
@@ -300,6 +354,77 @@ export default new Worker<OwnerDiscoveryJob>(
         companyMatches: companyHits.map(summarizeCompany),
         officerMatches: officerHits.map(summarizeOfficer),
       });
+
+      const matchedCompanies = companyHits
+        .filter((hit) => hit.matched && hit.matchConfidence >= 0.7 && !!hit.companyNumber)
+        .slice(0, 5);
+      const chAffiliatedNames = new Set<string>();
+      if (matchedCompanies.length) {
+        const companyPersonsForLog: Array<{ companyNumber: string; companyName: string; directors: number; pscs: number }> = [];
+        for (const company of matchedCompanies) {
+          if (!company.companyNumber) continue;
+          const [directors, pscs] = await Promise.all([
+            listCompanyDirectors(company.companyNumber).catch(async (err) => {
+              await logEvent(jobId, 'warn', 'Failed to fetch company directors', {
+                companyNumber: company.companyNumber,
+                companyName: company.companyName,
+                error: String(err),
+              });
+              return [] as CompanyOfficerRecord[];
+            }),
+            listCompanyPscs(company.companyNumber).catch(async (err) => {
+              await logEvent(jobId, 'warn', 'Failed to fetch company PSCs', {
+                companyNumber: company.companyNumber,
+                companyName: company.companyName,
+                error: String(err),
+              });
+              return [] as CompanyPscRecord[];
+            }),
+          ]);
+
+          for (const officer of directors) {
+            const occ = occupantFromCompanyPerson(officer.name, {
+              source: 'director',
+              company,
+              officer,
+            });
+            if (!occ) continue;
+            occupantMap.set(occupantRecordKey(occ), occ);
+            chAffiliatedNames.add(normalizeName(occ.fullName));
+          }
+          for (const psc of pscs) {
+            const occ = occupantFromCompanyPerson(psc.name, {
+              source: 'psc',
+              company,
+              psc,
+            });
+            if (!occ) continue;
+            occupantMap.set(occupantRecordKey(occ), occ);
+            chAffiliatedNames.add(normalizeName(occ.fullName));
+          }
+          companyPersonsForLog.push({
+            companyNumber: company.companyNumber,
+            companyName: company.companyName,
+            directors: directors.length,
+            pscs: pscs.length,
+          });
+        }
+        if (companyPersonsForLog.length) {
+          await logEvent(jobId, 'info', 'Enriched occupants with Companies House data', {
+            companies: companyPersonsForLog,
+            totalOccupants: occupantMap.size,
+          });
+        }
+      }
+
+      const occupants = Array.from(occupantMap.values());
+      if (occupants.length !== openRegisterOccupants.length) {
+        await logEvent(jobId, 'info', 'Occupant list expanded with Companies House data', {
+          openRegisterCount: openRegisterOccupants.length,
+          total: occupants.length,
+          added: occupants.length - openRegisterOccupants.length,
+        });
+      }
 
       const officerNames = new Set<string>();
       for (const hit of officerHits) {
@@ -311,7 +436,7 @@ export default new Worker<OwnerDiscoveryJob>(
         }
       }
 
-      const confirmedMatches = new Set<string>();
+      const confirmedMatches = new Set<string>(chAffiliatedNames);
       for (const occ of occupants) {
         const norm = normalizeName(occ.fullName);
         if (norm && officerNames.has(norm)) {
