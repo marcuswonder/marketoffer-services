@@ -2,7 +2,7 @@ import "dotenv/config";
 import { Worker } from "bullmq";
 import { connection } from "../queues/index.js";
 import { companyQ } from "../queues/index.js";
-import { httpGetJson } from "../lib/http.js";
+import { chGetJson } from "../lib/companiesHouseClient.js";
 import { parseOfficerName, officerIdFromUrl, monthStr, nameMatches, normalizeWord } from "../lib/normalize.js";
 import { batchCreate } from "../lib/airtable.js";
 import { logger } from "../lib/logger.js";
@@ -10,14 +10,6 @@ import { initDb, startJob, logEvent, completeJob, failJob } from "../lib/progres
 import { query } from "../lib/db.js";
 
 const WRITE_TO_AIRTABLE = (process.env.WRITE_TO_AIRTABLE || "").toLowerCase() === 'true';
-
-const CH_BASE = process.env.CH_API_BASE || "https://api.company-information.service.gov.uk";
-const CH_KEY = process.env.CH_API_KEY || "";
-
-function chHeaders() {
-  const auth = Buffer.from(`${CH_KEY}:`).toString("base64");
-  return { Authorization: `Basic ${auth}` };
-}
 
 type CHOfficer = {
   name: string;
@@ -37,12 +29,12 @@ export default new Worker("ch-appointments", async job => {
   await startJob({ jobId: job.id as string, queue: 'ch-appointments', name: job.name, payload: job.data });
 
   try {
-      const company = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}`, { headers: chHeaders() });
+      const company = await chGetJson<any>(`/company/${companyNumber}`);
       // console.log("company in initDB in workers/chAppointments.ts", company);
 
       await logEvent(job.id as string, 'info', 'Fetched company', { companyNumber, company_name: company.company_name });
 
-      const officers = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}/officers`, { headers: chHeaders() });
+      const officers = await chGetJson<any>(`/company/${companyNumber}/officers`);
       // console.log("officers in initDB in workers/chAppointments.ts", officers);
       
       await logEvent(job.id as string, 'info', 'Fetched officers', {
@@ -62,7 +54,9 @@ export default new Worker("ch-appointments", async job => {
       let start = 0;
       const page = 100;
       while (true) {
-        const data = await httpGetJson<any>(`${CH_BASE}/officers/${officerId}/appointments?start_index=${start}&items_per_page=${page}`, { headers: chHeaders() });
+        const data = await chGetJson<any>(
+          `/officers/${officerId}/appointments?start_index=${start}&items_per_page=${page}`
+        );
         const pageItems = (data.items || []) as any[];
         items.push(...pageItems);
         const total = typeof data.total_results === 'number' ? data.total_results : pageItems.length;
@@ -75,9 +69,10 @@ export default new Worker("ch-appointments", async job => {
     // Search officers by name via CH search API
     async function searchOfficersByName(queryStr: string) {
       if (!queryStr.trim()) return [] as any[];
-      const url = `${CH_BASE}/search/officers?q=${encodeURIComponent(queryStr)}&items_per_page=50`;
       try {
-        const res = await httpGetJson<any>(url, { headers: chHeaders() });
+        const res = await chGetJson<any>(
+          `/search/officers?q=${encodeURIComponent(queryStr)}&items_per_page=50`
+        );
         return Array.isArray(res.items) ? res.items : [];
       } catch {
         return [] as any[];
@@ -148,7 +143,7 @@ export default new Worker("ch-appointments", async job => {
           let co = companyCache.get(coNum);
           if (!co) {
             try {
-              co = await httpGetJson<any>(`${CH_BASE}/company/${coNum}`, { headers: chHeaders() });
+              co = await chGetJson<any>(`/company/${coNum}`);
             } catch {
               co = {};
             }
@@ -273,7 +268,7 @@ export default new Worker("ch-appointments", async job => {
               let co = companyCache.get(coNum);
               if (!co) {
                 try {
-                  co = await httpGetJson<any>(`${CH_BASE}/company/${coNum}`, { headers: chHeaders() });
+                  co = await chGetJson<any>(`/company/${coNum}`);
                 } catch {
                   co = {};
                 }
@@ -357,7 +352,9 @@ export default new Worker("ch-appointments", async job => {
     // Also check PSCs if no directorial match was found
     if (!peopleRecords.length) {
       try {
-        const pscs: any = await httpGetJson<any>(`${CH_BASE}/company/${companyNumber}/persons-with-significant-control`, { headers: chHeaders() });
+        const pscs: any = await chGetJson<any>(
+          `/company/${companyNumber}/persons-with-significant-control`
+        );
         const pscItems = (pscs.items || []) as any[];
         for (const p of pscItems) {
           const nameRaw: string | undefined =

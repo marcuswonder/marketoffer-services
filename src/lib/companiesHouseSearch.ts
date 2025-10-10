@@ -1,16 +1,8 @@
-import { Buffer } from 'node:buffer';
 import { logger } from './logger.js';
-import { httpGetJson } from './http.js';
 import { AddressInput, normalizePostcode } from './address.js';
+import { chGetJson } from './companiesHouseClient.js';
 
-const CH_BASE = process.env.CH_API_BASE || 'https://api.company-information.service.gov.uk';
-const CH_KEY = process.env.CH_API_KEY || '';
-
-function chHeaders() {
-  if (!CH_KEY) throw new Error('Missing CH_API_KEY');
-  const auth = Buffer.from(`${CH_KEY}:`).toString('base64');
-  return { Authorization: `Basic ${auth}` };
-}
+const HAS_CH_API_KEY = Boolean((process.env.CH_API_KEY || '').trim());
 
 function tokenize(value: string): string[] {
   if (!value) return [];
@@ -204,14 +196,14 @@ export type OfficerAddressHit = {
 };
 
 export async function searchCompaniesByAddress(address: AddressInput): Promise<CompanyAddressHit[]> {
-  if (!CH_KEY) {
+  if (!HAS_CH_API_KEY) {
     logger.debug('Skipping CH company search; no API key');
     return [];
   }
   const q = encodeURIComponent(`${address.line1} ${address.postcode}`.trim());
-  const url = `${CH_BASE}/search/companies?q=${q}&items_per_page=50`;
+  const endpoint = `/search/companies?q=${q}&items_per_page=50`;
   try {
-    const json = await httpGetJson<any>(url, { headers: chHeaders(), retries: 2 });
+    const json = await chGetJson<any>(endpoint, { retries: 2 });
     const items = Array.isArray(json?.items) ? json.items : [];
     const scored: CompanyAddressHit[] = items
       .map((item: any): CompanyAddressHit => {
@@ -238,14 +230,14 @@ export async function searchCompaniesByAddress(address: AddressInput): Promise<C
 }
 
 export async function searchOfficersByAddress(address: AddressInput): Promise<OfficerAddressHit[]> {
-  if (!CH_KEY) {
+  if (!HAS_CH_API_KEY) {
     logger.debug('Skipping CH officer search; no API key');
     return [];
   }
   const q = encodeURIComponent(`${address.line1} ${address.postcode}`.trim());
-  const url = `${CH_BASE}/search/officers?q=${q}&items_per_page=50`;
+  const endpoint = `/search/officers?q=${q}&items_per_page=50`;
   try {
-    const json = await httpGetJson<any>(url, { headers: chHeaders(), retries: 2 });
+    const json = await chGetJson<any>(endpoint, { retries: 2 });
     const items = Array.isArray(json?.items) ? json.items : [];
     const scored: OfficerAddressHit[] = items
       .map((item: any): OfficerAddressHit => {
@@ -270,15 +262,13 @@ export async function searchOfficersByAddress(address: AddressInput): Promise<Of
 }
 
 export async function fetchCompany(companyNumber: string): Promise<any> {
-  if (!CH_KEY) throw new Error('Missing CH_API_KEY');
-  const url = `${CH_BASE}/company/${companyNumber}`;
-  return httpGetJson<any>(url, { headers: chHeaders(), retries: 2 });
+  if (!HAS_CH_API_KEY) throw new Error('Missing CH_API_KEY');
+  return chGetJson<any>(`/company/${companyNumber}`, { retries: 2 });
 }
 
 export async function fetchOfficerAppointments(officerId: string): Promise<any> {
-  if (!CH_KEY) throw new Error('Missing CH_API_KEY');
-  const url = `${CH_BASE}/officers/${officerId}/appointments`; // default page size 20
-  return httpGetJson<any>(url, { headers: chHeaders(), retries: 2 });
+  if (!HAS_CH_API_KEY) throw new Error('Missing CH_API_KEY');
+  return chGetJson<any>(`/officers/${officerId}/appointments`, { retries: 2 });
 }
 
 export function summarizeOfficer(officer: OfficerAddressHit) {
@@ -321,10 +311,14 @@ export type CompanyPscRecord = {
 };
 
 export async function listCompanyDirectors(companyNumber: string): Promise<CompanyOfficerRecord[]> {
-  if (!CH_KEY) throw new Error('Missing CH_API_KEY');
-  const url = `${CH_BASE}/company/${companyNumber}/officers?items_per_page=100`;
+  if (!HAS_CH_API_KEY) {
+    logger.debug({ companyNumber }, 'Skipping CH directors list; no API key');
+    return [];
+  }
   try {
-    const json = await httpGetJson<any>(url, { headers: chHeaders(), retries: 2 });
+    const json = await chGetJson<any>(`/company/${companyNumber}/officers?items_per_page=100`, {
+      retries: 2,
+    });
     const items = Array.isArray(json?.items) ? json.items : [];
     return items
       .filter((item: any) => {
@@ -347,10 +341,15 @@ export async function listCompanyDirectors(companyNumber: string): Promise<Compa
 }
 
 export async function listCompanyPscs(companyNumber: string): Promise<CompanyPscRecord[]> {
-  if (!CH_KEY) throw new Error('Missing CH_API_KEY');
-  const url = `${CH_BASE}/company/${companyNumber}/persons-with-significant-control`;
+  if (!HAS_CH_API_KEY) {
+    logger.debug({ companyNumber }, 'Skipping CH PSC list; no API key');
+    return [];
+  }
   try {
-    const json = await httpGetJson<any>(url, { headers: chHeaders(), retries: 2 });
+    const json = await chGetJson<any>(
+      `/company/${companyNumber}/persons-with-significant-control`,
+      { retries: 2 }
+    );
     const items = Array.isArray(json?.items) ? json.items : [];
     return items
       .map((item: any) => {
