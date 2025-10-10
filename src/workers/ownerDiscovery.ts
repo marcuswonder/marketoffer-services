@@ -131,6 +131,7 @@ function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: Addre
     raw: value,
     tokens: new Set(tokens(value)),
   }));
+  console.log('Target variants for address in ownerDiscovery:', targetVariants.map((v) => v.raw));
   if (!targetVariants.length) return null;
 
   type MatchResult = {
@@ -250,6 +251,8 @@ export default new Worker<OwnerDiscoveryJob>(
       // Step 1: Land Registry corporate ownership check
       let corporate: CorporateOwnerMatch | null = null;
       const postcodeHits = await searchCorporateOwnersByPostcode(address.postcode);
+      console.log('Corporate postcode hits in ownerDiscovery:', postcodeHits.length, postcodeHits.slice(0, 5).map((h) => h.ownerName));
+
       if (postcodeHits.length) {
         const best = chooseCorporateMatch(postcodeHits, address);
         await logEvent(jobId, 'info', 'Corporate postcode search', {

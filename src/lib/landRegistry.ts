@@ -4,6 +4,7 @@ import { fetch } from 'undici';
 import { logger } from './logger.js';
 import { AddressInput, addressKey, prettyAddress, normalizePostcode } from './address.js';
 import { pool, query } from './db.js';
+import { logEvent } from '../lib/progress.js';
 
 export type CorporateOwnerRecord = {
   ownerName: string;
@@ -55,6 +56,63 @@ const API_SEARCH_BASES = [
 
 let datasetCache: Map<string, CorporateOwnerRecord> | null = null;
 let datasetCacheLoaded = false;
+
+function tokenizeAddress(value: string | undefined | null): string[] {
+  if (!value) return [];
+  return value
+    .toLowerCase()
+    .replace(/[\u2013\u2014\-\/]/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function addressTokensFromRecord(record: CorporateOwnerRecord): Set<string> {
+  const tokens = new Set<string>();
+  const addTokens = (val: string | undefined | null) => {
+    for (const token of tokenizeAddress(val)) tokens.add(token);
+  };
+
+  const keyParts = (record.addressKey || '').split('|');
+  keyParts.forEach((part) => addTokens(part));
+
+  const raw = record.raw || {};
+  addTokens(raw?.property_address || raw?.Property_Address);
+  addTokens(raw?.address || raw?.Address);
+  addTokens(raw?.premises);
+
+  const rawAddressLines = Array.isArray(raw?.address_lines) ? raw.address_lines : [];
+  rawAddressLines.forEach((line: any) => addTokens(typeof line === 'string' ? line : ''));
+
+  const proprietorLines = Array.isArray(raw?.proprietor?.address_lines) ? raw.proprietor.address_lines : [];
+  proprietorLines.forEach((line: any) => addTokens(typeof line === 'string' ? line : ''));
+
+  return tokens;
+}
+
+function addressMatchesInput(record: CorporateOwnerRecord, address: AddressInput): boolean {
+  const candidateTokens = addressTokensFromRecord(record);
+  if (!candidateTokens.size) return false;
+
+  const primaryTokens = tokenizeAddress(address.line1);
+  if (!primaryTokens.length) return false;
+
+  const secondaryTokens = tokenizeAddress(address.line2 || '');
+  const requiredTokens = secondaryTokens.length
+    ? Array.from(new Set([...primaryTokens, ...secondaryTokens]))
+    : primaryTokens;
+
+  const numericTokens = requiredTokens.filter((token) => /\d/.test(token));
+  if (numericTokens.length && !numericTokens.every((token) => candidateTokens.has(token))) {
+    return false;
+  }
+
+  if (!requiredTokens.every((token) => candidateTokens.has(token))) {
+    return false;
+  }
+
+  return true;
+}
 
 export async function searchCorporateOwnersByPostcode(postcode: string): Promise<CorporateOwnerRecord[]> {
   const normalized = normalizePostcode(postcode);
@@ -515,7 +573,7 @@ export async function findCorporateOwner(address: AddressInput): Promise<Corpora
   if (dataset.size) {
     const key = addressKey(address);
     const direct = key ? dataset.get(key) : undefined;
-    if (direct && direct.ownerName) {
+    if (direct && direct.ownerName && addressMatchesInput(direct, address)) {
       return {
         matchType: 'exact',
         ownerName: direct.ownerName,
@@ -531,7 +589,8 @@ export async function findCorporateOwner(address: AddressInput): Promise<Corpora
         const pc = normalizePostcode(
           rec.raw?.postcode || rec.raw?.pc || rec.raw?.postal_code || rec.raw?.post_code
         );
-        return pc === postcode;
+        if (pc !== postcode) return false;
+        return addressMatchesInput(rec, address);
       });
       if (hits.length === 1 && hits[0].ownerName) {
         return {
@@ -545,5 +604,21 @@ export async function findCorporateOwner(address: AddressInput): Promise<Corpora
     }
   }
 
-  return lookupSearchApi(pretty);
+  const fallback = await lookupSearchApi(pretty);
+  if (!fallback) return null;
+
+  if (fallback.raw) {
+    const synthetic: CorporateOwnerRecord = {
+      ownerName: fallback.ownerName,
+      companyNumber: fallback.companyNumber,
+      addressKey: '',
+      raw: fallback.raw,
+    };
+    if (!addressMatchesInput(synthetic, address)) {
+      logger.debug({ address: pretty }, 'Discarded Land Registry API result due to address mismatch');
+      return null;
+    }
+  }
+
+  return fallback;
 }
