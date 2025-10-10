@@ -49,7 +49,7 @@ router.get('/progress/workflows', async (req, res) => {
 
   const rootsQ = `SELECT job_id, queue, name, status, data, created_at, updated_at
                     FROM job_progress
-                   WHERE queue = 'ch-appointments'
+                   WHERE queue IN ('ch-appointments','owner-discovery')
                    ORDER BY updated_at DESC
                    LIMIT ${limit}`;
   const { rows: roots } = await query(rootsQ);
@@ -72,9 +72,11 @@ router.get('/progress/workflows', async (req, res) => {
       }
       return m;
     };
+    const flowType = r.queue === 'owner-discovery' ? 'owner' : 'company';
     out.push({
       rootJobId: rootId,
       root: r,
+      flowType,
       discovery: {
         company: summarize('company-discovery'),
         sitefetch: summarize('site-fetch')
