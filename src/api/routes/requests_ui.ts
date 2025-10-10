@@ -218,7 +218,7 @@ const page = [
   '          </details>',
   '        `;',
   '        card.innerHTML = html;',
-  '        const payload = card.querySelector("[data-role=\"payload\"]");',
+  '        const payload = card.querySelector(`[data-role="payload"]`);',
   '        if (payload) payload.textContent = safe(r?.data || {});',
   '        card.addEventListener("click", (ev) => {',
   '          if ((ev.target instanceof HTMLElement) && ev.target.closest("a")) return;',
