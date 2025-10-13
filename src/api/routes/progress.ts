@@ -4,6 +4,67 @@ import { query } from '../../lib/db.js';
 
 export const router = Router();
 
+async function deleteWorkflowRecords(rootJobId: string) {
+  // Owner discovery tables
+  await query(
+    `DELETE FROM owner_signals
+       WHERE candidate_id IN (
+         SELECT id FROM owner_candidates
+           WHERE property_id IN (
+             SELECT id FROM owner_properties
+               WHERE root_job_id = $1 OR job_id = $1
+           )
+       )`,
+    [rootJobId]
+  );
+
+  await query(
+    `DELETE FROM owner_candidates
+       WHERE property_id IN (
+         SELECT id FROM owner_properties
+           WHERE root_job_id = $1 OR job_id = $1
+       )`,
+    [rootJobId]
+  );
+
+  await query(
+    `DELETE FROM owner_properties
+       WHERE root_job_id = $1 OR job_id = $1`,
+    [rootJobId]
+  );
+
+  // Companies House tables
+  await query(
+    `DELETE FROM ch_appointments
+       WHERE person_id IN (
+         SELECT id FROM ch_people WHERE root_job_id = $1
+       )`,
+    [rootJobId]
+  );
+
+  await query(
+    `DELETE FROM ch_people WHERE root_job_id = $1`,
+    [rootJobId]
+  );
+
+  // Job progress logs and events
+  await query(
+    `DELETE FROM job_events
+       WHERE job_id IN (
+         SELECT job_id
+           FROM job_progress
+          WHERE job_id = $1 OR data->>'rootJobId' = $1
+       )`,
+    [rootJobId]
+  );
+
+  await query(
+    `DELETE FROM job_progress
+       WHERE job_id = $1 OR data->>'rootJobId' = $1`,
+    [rootJobId]
+  );
+}
+
 router.get('/progress/jobs', async (req, res) => {
   const schema = z.object({
     limit: z.string().optional(),
@@ -122,4 +183,14 @@ router.get('/progress/workflows/:rootJobId/timeline', async (req, res) => {
   const evQ = `SELECT job_id, ts, level, message, data FROM job_events WHERE job_id = ANY($1::text[]) ORDER BY ts ASC, id ASC`;
   const { rows: events } = await query(evQ, [ids]);
   res.json({ jobs: ids, events });
+});
+
+router.delete('/progress/workflows/:rootJobId', async (req, res) => {
+  const { rootJobId } = z.object({ rootJobId: z.string().min(1) }).parse(req.params as any);
+  try {
+    await deleteWorkflowRecords(rootJobId);
+    res.json({ status: 'ok' });
+  } catch (err) {
+    res.status(500).json({ error: 'delete_failed', message: err instanceof Error ? err.message : String(err) });
+  }
 });

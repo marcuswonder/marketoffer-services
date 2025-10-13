@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { Worker } from 'bullmq';
-import { connection, chQ } from '../queues/index.js';
+import { connection, chQ, companyQ } from '../queues/index.js';
 import { initDb, startJob, logEvent, completeJob, failJob } from '../lib/progress.js';
 import { query } from '../lib/db.js';
 import { AddressInput, prettyAddress, addressKey } from '../lib/address.js';
@@ -27,6 +27,8 @@ await initDb();
 const ACCEPT_THRESHOLD = Number(process.env.OWNER_ACCEPT_THRESHOLD || 0.55);
 const REVIEW_THRESHOLD = Number(process.env.OWNER_REVIEW_THRESHOLD || 0.35);
 const AUTO_QUEUE_CH = (process.env.OWNER_QUEUE_CH_DIRECTORS || 'true').toLowerCase() === 'true';
+const AUTO_QUEUE_COMPANY_DISCOVERY =
+  (process.env.OWNER_QUEUE_COMPANY_DISCOVERY || 'true').toLowerCase() === 'true';
 
 export type OwnerDiscoveryJob = {
   address: AddressInput;
@@ -337,11 +339,13 @@ export default new Worker<OwnerDiscoveryJob>(
       await logEvent(jobId, 'info', 'Open register results', {
         count: openRegisterOccupants.length,
         source: register?.source || null,
+        openRegisterOccupants: openRegisterOccupants || null,
       });
       if (rootJobId && openRegisterOccupants.length) {
         await logEvent(rootJobId, 'info', 'Occupants located', {
           childJobId: jobId,
           count: openRegisterOccupants.length,
+          openRegisterOccupants: openRegisterOccupants || null,
         });
       }
 
@@ -362,6 +366,7 @@ export default new Worker<OwnerDiscoveryJob>(
         .filter((hit) => hit.matched && hit.matchConfidence >= 0.7 && !!hit.companyNumber)
         .slice(0, 5);
       const chAffiliatedNames = new Set<string>();
+      const enqueuedCompanies: string[] = [];
       if (matchedCompanies.length) {
         const companyPersonsForLog: Array<{ companyNumber: string; companyName: string; directors: number; pscs: number }> = [];
         for (const company of matchedCompanies) {
@@ -417,6 +422,38 @@ export default new Worker<OwnerDiscoveryJob>(
             companies: companyPersonsForLog,
             totalOccupants: occupantMap.size,
           });
+        }
+
+        if (AUTO_QUEUE_COMPANY_DISCOVERY) {
+          for (const company of matchedCompanies) {
+            if (!company.companyNumber || enqueuedCompanies.includes(company.companyNumber)) continue;
+            try {
+              const coJobId = `owner-company:${company.companyNumber}`;
+              await companyQ.add(
+                'discover',
+                {
+                  companyNumber: company.companyNumber,
+                  companyName: company.companyName,
+                  address: pretty,
+                  postcode: address.postcode,
+                  rootJobId: rootJobId || undefined,
+                },
+                { jobId: coJobId, attempts: 5, backoff: { type: 'exponential', delay: 1500 } }
+              );
+              enqueuedCompanies.push(company.companyNumber);
+            } catch (err) {
+              await logEvent(jobId, 'warn', 'Failed to enqueue company discovery from owner match', {
+                companyNumber: company.companyNumber,
+                companyName: company.companyName,
+                error: String(err),
+              });
+            }
+          }
+          if (enqueuedCompanies.length) {
+            await logEvent(jobId, 'info', 'Enqueued company discovery jobs from owner search', {
+              companies: enqueuedCompanies,
+            });
+          }
         }
       }
 
