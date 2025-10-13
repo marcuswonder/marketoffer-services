@@ -38,7 +38,12 @@ export type OwnerDiscoveryJob = {
 };
 
 function normalizeName(name: string): string {
-  return (name || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return (name || '')
+    .toLowerCase()
+    // remove common titles/honorifics at start
+    .replace(/^(mr|mrs|ms|miss|dr|prof|sir|dame|lady|lord)\b\.?\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 async function upsertProperty(jobId: string, payload: OwnerDiscoveryJob): Promise<{ id: number }> {
@@ -483,6 +488,8 @@ export default new Worker<OwnerDiscoveryJob>(
           confirmedMatches.add(norm);
         }
       }
+
+      
 
       // Step 3: Apply rubric scoring (using confirmed matches to boost scores)
       const candidates = scoreOccupants(occupants, { confirmedMatches });

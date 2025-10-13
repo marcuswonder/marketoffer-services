@@ -222,7 +222,7 @@ const page = [
   '          <div class="actions">',
   '            <a href="/admin/progress?root=${encodeURIComponent(id)}">Progress</a>',
   '            <a href="/admin/workflows?root=${encodeURIComponent(id)}">Workflow Detail</a>',
-  '            <button type="button" data-role="delete" data-root="${esc(id)}">Trash</button>',
+  '            <button type="button" data-role="delete" data-root="${esc(id)}">Delete</button>',
   '          </div>',
   '          <details>',
   '            <summary>Data Output</summary>',
