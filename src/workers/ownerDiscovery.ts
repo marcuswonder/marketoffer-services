@@ -234,6 +234,30 @@ function addOrMergeOccupant(
   return { added: false, merged: true, key };
 }
 
+function addressInputFromChAddress(addr: any): AddressInput | null {
+  if (!addr) return null;
+  const line1Parts = [addr.premises, addr.address_line_1].filter(Boolean);
+  const line1 = line1Parts.length ? line1Parts.join(' ') : (addr.address_line_1 || addr.premises || '').trim();
+  if (!line1 && !addr.postal_code) return null;
+  return {
+    line1: (line1 || '').trim(),
+    line2: (addr.address_line_2 || '').trim() || null,
+    city: (addr.locality || addr.region || '').trim() || null,
+    postcode: (addr.postal_code || '').trim(),
+    country: (addr.country || 'GB').trim(),
+  } as AddressInput;
+}
+
+function chPersonalAddressMatchesPrompt(chAddr: any, prompt: AddressInput): boolean {
+  const ai = addressInputFromChAddress(chAddr);
+  if (!ai) return false;
+  try {
+    return addressKey(ai) === addressKey(prompt);
+  } catch {
+    return false;
+  }
+}
+
 function occupantFromCompanyPerson(
   name: string,
   opts: {
@@ -437,7 +461,16 @@ export default new Worker<OwnerDiscoveryJob>(
       const chAffiliatedNames = new Set<string>();
       const enqueuedCompanies: string[] = [];
       if (matchedCompanies.length) {
-        const companyPersonsForLog: Array<{ companyNumber: string; companyName: string; directors: number; pscs: number }> = [];
+        const companyPersonsForLog: Array<{
+          companyNumber: string;
+          companyName: string;
+          directors: number;
+          pscs: number;
+          savedDirectorsAtAddress: string[];
+          savedPscsAtAddress: string[];
+          directorsHeldNotAtAddress: Array<{ name: string; appointedOn?: string | null; address?: any }>;
+          pscsHeldNotAtAddress: Array<{ name: string; ceasedOn?: string | null; address?: any }>;
+        }> = [];
         for (const company of matchedCompanies) {
           if (!company.companyNumber) continue;
           const [directors, pscs] = await Promise.all([
@@ -459,31 +492,66 @@ export default new Worker<OwnerDiscoveryJob>(
             }),
           ]);
 
+          // Separate CH people whose PERSONAL address matches the prompt from those who don't
+          const savedDirectorsAtAddress: string[] = [];
+          const savedPscsAtAddress: string[] = [];
+          const directorsHeldNotAtAddress: Array<{ name: string; appointedOn?: string | null; address?: any }> = [];
+          const pscsHeldNotAtAddress: Array<{ name: string; ceasedOn?: string | null; address?: any }> = [];
+
           for (const officer of directors) {
-            const occ = occupantFromCompanyPerson(officer.name, {
-              source: 'director',
-              company,
-              officer,
-            });
-            if (!occ) continue;
-            addOrMergeOccupant(occupantMap, occ);
-            chAffiliatedNames.add(normalizeName(occ.fullName));
+            const personalMatches = chPersonalAddressMatchesPrompt(officer.address, address);
+            if (personalMatches) {
+              const occ = occupantFromCompanyPerson(officer.name, {
+                source: 'director',
+                company,
+                officer,
+              });
+              if (occ) {
+                addOrMergeOccupant(occupantMap, occ);
+                chAffiliatedNames.add(normalizeName(occ.fullName));
+                savedDirectorsAtAddress.push(occ.fullName);
+              }
+            } else {
+              directorsHeldNotAtAddress.push({
+                name: officer.name,
+                appointedOn: officer.appointedOn || null,
+                address: officer.address || null,
+              });
+            }
           }
+
           for (const psc of pscs) {
-            const occ = occupantFromCompanyPerson(psc.name, {
-              source: 'psc',
-              company,
-              psc,
-            });
-            if (!occ) continue;
-            addOrMergeOccupant(occupantMap, occ);
-            chAffiliatedNames.add(normalizeName(occ.fullName));
+            const personalMatches = chPersonalAddressMatchesPrompt(psc.address, address);
+            if (personalMatches) {
+              const occ = occupantFromCompanyPerson(psc.name, {
+                source: 'psc',
+                company,
+                psc,
+              });
+              if (occ) {
+                addOrMergeOccupant(occupantMap, occ);
+                chAffiliatedNames.add(normalizeName(occ.fullName));
+                savedPscsAtAddress.push(occ.fullName);
+              }
+            } else {
+              pscsHeldNotAtAddress.push({
+                name: psc.name,
+                ceasedOn: psc.ceasedOn || null,
+                address: psc.address || null,
+              });
+            }
           }
+
+          // Keep rich per-company log + “hold” non-at-address people under the company
           companyPersonsForLog.push({
             companyNumber: company.companyNumber,
             companyName: company.companyName,
             directors: directors.length,
             pscs: pscs.length,
+            savedDirectorsAtAddress,
+            savedPscsAtAddress,
+            directorsHeldNotAtAddress,
+            pscsHeldNotAtAddress,
           });
         }
         if (companyPersonsForLog.length) {

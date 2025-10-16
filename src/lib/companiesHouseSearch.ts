@@ -460,6 +460,7 @@ export function summarizeCompany(hit: CompanyAddressHit) {
 
 export type CompanyOfficerRecord = {
   name: string;
+  address?: string;
   appointedOn?: string;
   resignedOn?: string;
   officerRole?: string;
@@ -469,6 +470,7 @@ export type CompanyOfficerRecord = {
 
 export type CompanyPscRecord = {
   name: string;
+  address?: string;
   ceasedOn?: string;
   natureOfControl?: string[];
   raw?: any;
