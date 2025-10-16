@@ -40,7 +40,6 @@ export type OwnerDiscoveryJob = {
 function normalizeName(name: string): string {
   return (name || '')
     .toLowerCase()
-    // remove common titles/honorifics at start
     .replace(/^(mr|mrs|ms|miss|dr|prof|sir|dame|lady|lord)\b\.?\s+/i, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -197,6 +196,44 @@ function occupantRecordKey(rec: OccupantRecord): string {
   return normalizeName(name);
 }
 
+function addOrMergeOccupant(
+  map: Map<string, OccupantRecord>,
+  incoming: OccupantRecord
+): { added: boolean; merged: boolean; key: string } {
+  const key = occupantRecordKey(incoming);
+  const existing = map.get(key);
+  if (!existing) {
+    map.set(key, incoming);
+    return { added: true, merged: false, key };
+  }
+
+  const firstSeenA = existing.firstSeenYear ?? Number.POSITIVE_INFINITY;
+  const firstSeenB = incoming.firstSeenYear ?? Number.POSITIVE_INFINITY;
+  const lastSeenA = existing.lastSeenYear ?? Number.NEGATIVE_INFINITY;
+  const lastSeenB = incoming.lastSeenYear ?? Number.NEGATIVE_INFINITY;
+
+  const merged: OccupantRecord = {
+    firstName: existing.firstName || incoming.firstName,
+    lastName: existing.lastName || incoming.lastName,
+    fullName: (existing.fullName?.length || 0) >= (incoming.fullName?.length || 0)
+      ? existing.fullName
+      : incoming.fullName,
+    ageBand: existing.ageBand ?? incoming.ageBand,
+    birthYear: existing.birthYear ?? incoming.birthYear,
+    firstSeenYear: isFinite(Math.min(firstSeenA, firstSeenB))
+      ? Math.min(firstSeenA, firstSeenB)
+      : (existing.firstSeenYear ?? incoming.firstSeenYear),
+    lastSeenYear: isFinite(Math.max(lastSeenA, lastSeenB))
+      ? Math.max(lastSeenA, lastSeenB)
+      : (existing.lastSeenYear ?? incoming.lastSeenYear),
+    dataSources: Array.from(new Set([...(existing.dataSources || []), ...(incoming.dataSources || [])])),
+    indicators: Array.from(new Set([...(existing.indicators || []), ...(incoming.indicators || [])])),
+  };
+
+  map.set(key, merged);
+  return { added: false, merged: true, key };
+}
+
 function occupantFromCompanyPerson(
   name: string,
   opts: {
@@ -340,12 +377,17 @@ export default new Worker<OwnerDiscoveryJob>(
 
       // Step 2: Open register lookup
       const register = await lookupOpenRegister(address);
+      await logEvent(jobId, 'info', 'lookupOpenRegister data', {
+        register: register,
+      });
+
       const openRegisterOccupants = register?.occupants || [];
       await logEvent(jobId, 'info', 'Open register results', {
         count: openRegisterOccupants.length,
         source: register?.source || null,
         openRegisterOccupants: openRegisterOccupants || null,
       });
+      
       if (rootJobId && openRegisterOccupants.length) {
         await logEvent(rootJobId, 'info', 'Occupants located', {
           childJobId: jobId,
@@ -354,22 +396,44 @@ export default new Worker<OwnerDiscoveryJob>(
         });
       }
 
+      // Track which occupants came from Open Register so we can enforce provenance later
+      const openRegisterKeys = new Set<string>();
+
       const occupantMap = new Map<string, OccupantRecord>();
       for (const occ of openRegisterOccupants) {
-        occupantMap.set(occupantRecordKey(occ), occ);
+        const enriched: OccupantRecord = {
+          ...occ,
+          dataSources: Array.from(new Set([...(occ.dataSources || []), 'open_register', register?.source ? `or_${register.source}` : undefined].filter(Boolean) as string[])),
+          indicators: Array.from(new Set([...(occ.indicators || []), 'open_register'])),
+        };
+        const key = occupantRecordKey(enriched);
+        addOrMergeOccupant(occupantMap, enriched);
+        openRegisterKeys.add(key);
       }
 
       // Step 4: Companies House search (done before scoring to feed rubric)
-      const companyHits = await searchCompaniesByAddress(address);
-      const officerHits = await searchOfficersByAddress(address);
+      const companyHits = await searchCompaniesByAddress(jobId, address);
+      const officerHits = await searchOfficersByAddress(jobId, address);
+
       await logEvent(jobId, 'info', 'Companies House address search', {
+        companyMatches: companyHits,
+        officerMatches: officerHits,
+      });
+
+      await logEvent(jobId, 'info', 'Summarized Companies House address search', {
         companyMatches: companyHits.map(summarizeCompany),
         officerMatches: officerHits.map(summarizeOfficer),
       });
 
       const matchedCompanies = companyHits
         .filter((hit) => hit.matched && hit.matchConfidence >= 0.7 && !!hit.companyNumber)
-        .slice(0, 5);
+        .sort((a, b) => b.matchConfidence - a.matchConfidence)
+
+      await logEvent(jobId, 'info', 'CH Companies Matched by address search', {
+        count: matchedCompanies.length,
+        matchedCompanies
+      });
+
       const chAffiliatedNames = new Set<string>();
       const enqueuedCompanies: string[] = [];
       if (matchedCompanies.length) {
@@ -402,7 +466,7 @@ export default new Worker<OwnerDiscoveryJob>(
               officer,
             });
             if (!occ) continue;
-            occupantMap.set(occupantRecordKey(occ), occ);
+            addOrMergeOccupant(occupantMap, occ);
             chAffiliatedNames.add(normalizeName(occ.fullName));
           }
           for (const psc of pscs) {
@@ -412,7 +476,7 @@ export default new Worker<OwnerDiscoveryJob>(
               psc,
             });
             if (!occ) continue;
-            occupantMap.set(occupantRecordKey(occ), occ);
+            addOrMergeOccupant(occupantMap, occ);
             chAffiliatedNames.add(normalizeName(occ.fullName));
           }
           companyPersonsForLog.push({
@@ -423,9 +487,20 @@ export default new Worker<OwnerDiscoveryJob>(
           });
         }
         if (companyPersonsForLog.length) {
+          const occupantsForLog = Array.from(occupantMap.entries()).map(([key, occ]) => ({
+            key,
+            fullName: occ.fullName,
+            firstName: occ.firstName,
+            lastName: occ.lastName,
+            firstSeenYear: occ.firstSeenYear,
+            lastSeenYear: occ.lastSeenYear,
+            dataSources: occ.dataSources,
+            indicators: occ.indicators,
+          }));
           await logEvent(jobId, 'info', 'Enriched occupants with Companies House data', {
             companies: companyPersonsForLog,
             totalOccupants: occupantMap.size,
+            occupants: occupantsForLog,
           });
         }
 
@@ -462,16 +537,45 @@ export default new Worker<OwnerDiscoveryJob>(
         }
       }
 
+      for (const key of openRegisterKeys) {
+        const occ = occupantMap.get(key);
+        if (!occ) continue;
+        const ds = new Set(occ.dataSources || []);
+        ds.add('open_register');
+        if (register?.source) ds.add(`or_${register.source}`);
+        const ind = new Set(occ.indicators || []);
+        ind.add('open_register');
+        occupantMap.set(key, {
+          ...occ,
+          dataSources: Array.from(ds),
+          indicators: Array.from(ind),
+        });
+      }
+
       const occupants = Array.from(occupantMap.values());
       if (occupants.length !== openRegisterOccupants.length) {
+        const occupantsForLog = occupants.map((occ) => ({
+          fullName: occ.fullName,
+          firstName: occ.firstName,
+          lastName: occ.lastName,
+          firstSeenYear: occ.firstSeenYear,
+          lastSeenYear: occ.lastSeenYear,
+          dataSources: occ.dataSources,
+          indicators: occ.indicators,
+        }));
         await logEvent(jobId, 'info', 'Occupant list expanded with Companies House data', {
           openRegisterCount: openRegisterOccupants.length,
           total: occupants.length,
           added: occupants.length - openRegisterOccupants.length,
+          occupants: occupantsForLog,
         });
       }
 
       const officerNames = new Set<string>();
+      // Track size and added keys before adding officer hits
+      const beforeOfficerAddSize = occupantMap.size;
+      const addedKeysFromOfficers: string[] = [];
+
       for (const hit of officerHits) {
         if (hit?.name) {
           const parsed = parseOfficerName(hit.name);
@@ -480,6 +584,57 @@ export default new Worker<OwnerDiscoveryJob>(
           officerNames.add(normalizeName(hit.name));
         }
       }
+      // Promote Companies House officer hits into occupant candidates (so they can be scored like Open Register occupants)
+      for (const hit of officerHits) {
+        // Build a full name from structured parts when available, else fall back to the display name
+        const first = (hit.firstName || '').trim();
+        const middle = (hit.middleName || '').trim();
+        const last = (hit.lastName || '').trim();
+        const parts = [first, middle, last].filter(Boolean);
+        const fullName = (parts.length ? parts.join(' ') : (hit.name || '')).trim();
+        if (!fullName) continue;
+
+        const occ: OccupantRecord = {
+          firstName: first || '',
+          lastName: last || '',
+          fullName,
+          ageBand: undefined,
+          birthYear: undefined,
+          firstSeenYear: undefined,
+          lastSeenYear: undefined,
+          dataSources: Array.from(new Set([
+            'companies_house_officer',
+            hit.officerId ? `ch_officer_${hit.officerId}` : undefined,
+          ].filter(Boolean) as string[])),
+          indicators: ['companies_house'],
+        };
+
+        const { added, key: occKey } = addOrMergeOccupant(occupantMap, occ);
+        if (added) addedKeysFromOfficers.push(occKey);
+      }
+
+      const afterOfficerAddSize = occupantMap.size;
+      const addedFromOfficers = afterOfficerAddSize - beforeOfficerAddSize;
+      const addedOccupantsForLog = addedKeysFromOfficers.map((key) => {
+        const occ = occupantMap.get(key)!;
+        return {
+          key,
+          fullName: occ.fullName,
+          firstName: occ.firstName,
+          lastName: occ.lastName,
+          firstSeenYear: occ.firstSeenYear,
+          lastSeenYear: occ.lastSeenYear,
+          dataSources: occ.dataSources,
+          indicators: occ.indicators,
+        };
+      });
+
+      await logEvent(jobId, 'info', 'Added officer hits as occupant candidates', {
+        officerHits: officerHits.length,
+        addedFromOfficers,
+        totalOccupantsNow: afterOfficerAddSize,
+        added: addedOccupantsForLog,
+      });
 
       const confirmedMatches = new Set<string>(chAffiliatedNames);
       for (const occ of occupants) {
@@ -595,3 +750,105 @@ export default new Worker<OwnerDiscoveryJob>(
   },
   { connection, concurrency: Number(process.env.OWNER_WORKER_CONCURRENCY || 2) }
 );
+
+// const temp = {
+//   "active_count":1,
+//   "date_of_birth": {
+//     "month":5,
+//     "year":1981
+//   },"etag":"5405e488d80e6636422aba24183ea44f33d79d5f",
+//   "inactive_count":2,
+//   "is_corporate_officer":false,
+//   "items":[
+//     {
+//       "address":{
+//         "address_line_1": "132 Ben Jonson Road",
+//         "country":"United Kingdom",
+//         "locality":"London",
+//         "postal_code":"E1 4GJ",
+//         "premises":"Apartment 305"
+//       },
+//       "appointed_on":"2015-08-12",
+//       "appointed_to":{
+//         "company_name":"ROCK BASE PROPERTIES LIMITED",
+//         "company_number":"09728495",
+//         "company_status":"dissolved"
+//       },"name":"Timothy AGBETILE",
+//       "country_of_residence":"United Kingdom",
+//       "is_pre_1992_appointment":false,
+//       "links":{
+//         "company":"/company/09728495"
+//       },
+//       "name_elements":{
+//         "forename":"Timothy",
+//         "title":"Mr",
+//         "surname":"AGBETILE"
+//       },
+//       "nationality":"British",
+//       "occupation":"Property",
+//       "officer_role":"director"
+//     },
+//     {
+//       "address":{
+//         "address_line_1":"Greenhough Road",
+//         "country":"United Kingdom",
+//         "locality":"Lichfield",
+//         "postal_code":"WS13 7FE",
+//         "premises":"4 Parkside Court",
+//         "region":"Staffordshire"
+//       },"appointed_on":"2015-04-18",
+//       "appointed_to":{
+//         "company_name":"VITAX SOLUTIONS LIMITED",
+//         "company_number":"09549152",
+//         "company_status":"active"
+//       },
+//       "name":"Timothy AGBETILE",
+//       "country_of_residence":"England",
+//       "is_pre_1992_appointment":false,
+//       "links":{
+//         "company":"/company/09549152"
+//       },
+//       "name_elements":{
+//         "forename":"Timothy",
+//         "title":"Mr",
+//         "surname":"AGBETILE"
+//       },"nationality":"British",
+//       "occupation":"Consultant",
+//       "officer_role":"director"
+//     },{
+//       "address":{
+//         "address_line_1":"Calico Business Park",
+//         "locality":"Sandy Way",
+//         "postal_code":"B77 4BF",
+//         "premises":"3 Hamel House",
+//         "region":"Tamworth"
+//       },
+//       "appointed_on":"2013-10-08",
+//       "appointed_to":{
+//         "company_name":"TIMTRIX LIMITED",
+//         "company_number":"08722589",
+//         "company_status":"dissolved"
+//       },"name":"Timothy AGBETILE",
+//       "country_of_residence":"United Kingdom",
+//       "is_pre_1992_appointment":false,
+//       "links":{
+//         "company":"/company/08722589"
+//       },
+//       "name_elements":{
+//         "forename":"Timothy",
+//         "title":"Mr",
+//         "surname":"AGBETILE"
+//       },"nationality":"British",
+//       "occupation":"Retail/Software",
+//       "officer_role":"director"
+//     }
+//   ],"items_per_page":35,
+//   "kind":"personal-appointment",
+//   "links":{
+//     "self":"/officers/SwGj0VQh0zdkZsfee4UOPaI2CZI/appointments"
+//   },
+//   "name":"Timothy AGBETILE",
+//   "resigned_count":0,
+//   "start_index":0,
+//   "total_results":3
+// }

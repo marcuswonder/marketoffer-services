@@ -144,22 +144,23 @@ export function scoreOccupants(records: OccupantRecord[], opts: RubricOptions = 
       });
     }
 
-    // Confirmed company house match
-    if (confirmed.has(fullName.toLowerCase())) {
-      const weight = 0.25;
+    // Confirmed company house match (treat as decisive when name + address align)
+    const isConfirmed = confirmed.has(fullName.toLowerCase());
+    if (isConfirmed) {
+      const weight = 1.0;
       signals.push({
         id: 'ch_match',
-        label: 'Companies House match',
+        label: 'Name + address officer match',
         weight,
         value: 1,
         score: weight,
         reason: 'Registered officer/company at address',
       });
     }
-
-    // Negative signal: multiple unrelated adults
+    
+    // Negative signal: multiple unrelated adults (skip if confirmed match already exists)
     const uniqueSurnames = lastNameCounts.size;
-    if (uniqueSurnames >= 3 && (rec.dataSources || []).length <= 1) {
+    if (!isConfirmed && uniqueSurnames >= 3 && (rec.dataSources || []).length <= 1) {
       const weight = 0.16;
       signals.push({
         id: 'unrelated_household',
