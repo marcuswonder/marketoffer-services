@@ -731,11 +731,23 @@ export default new Worker<OwnerDiscoveryJob>(
         }
       }
 
-      
+      await logEvent(jobId, 'debug', 'Scoring inputs', {
+        occupantCount: occupants.length,
+        confirmedMatches: Array.from(confirmedMatches),
+      });
 
       // Step 3: Apply rubric scoring (using confirmed matches to boost scores)
       const candidates = scoreOccupants(occupants, { confirmedMatches });
+      await logEvent(jobId, 'info', 'Scoring results', {
+        totalCandidates: candidates.length,
+        topFive: candidates.slice(0, 5).map(c => ({
+          name: c.fullName,
+          score: c.score,
+          rank: c.rank,
+        })),
+      });
       await clearCandidates(propertyId);
+      await logEvent(jobId, 'debug', 'Cleared previous candidates for property', { propertyId });
       for (const cand of candidates) {
         const { rows } = await query<{ id: number }>(
           `INSERT INTO owner_candidates (property_id, full_name, first_name, last_name, score, rank, sources, evidence)
@@ -753,6 +765,13 @@ export default new Worker<OwnerDiscoveryJob>(
           ]
         );
         const candidateId = rows[0].id;
+        await logEvent(jobId, 'debug', 'Persisted candidate', {
+          candidateId,
+          name: cand.fullName,
+          score: cand.score,
+          rank: cand.rank,
+          signalCount: cand.signals.length,
+        });
         for (const sig of cand.signals) {
           await query(
             `INSERT INTO owner_signals (candidate_id, signal_id, label, weight, value, score, reason)
@@ -760,6 +779,12 @@ export default new Worker<OwnerDiscoveryJob>(
             [candidateId, sig.id, sig.label, sig.weight, sig.value, sig.score, sig.reason]
           );
         }
+        await logEvent(jobId, 'debug', 'Persisted candidate signals', {
+          candidateId,
+          signals: cand.signals.map(s => ({
+            id: s.id, label: s.label, weight: s.weight, value: s.value, score: s.score
+          })),
+        });
       }
 
       const totalCandidates = candidates.length;
@@ -805,6 +830,15 @@ export default new Worker<OwnerDiscoveryJob>(
           }),
         ]
       );
+
+      await logEvent(jobId, 'info', 'Owner discovery decision', {
+        status,
+        thresholds: { ACCEPT_THRESHOLD, REVIEW_THRESHOLD },
+        best: best ? { name: best.fullName, score: best.score, rank: best.rank } : null,
+        occupantCount: occupants.length,
+        officerHits: officerHits.length,
+        companyMatches: companyHits.length,
+      });
 
       await logEvent(jobId, 'info', 'Owner discovery complete', {
         status,
