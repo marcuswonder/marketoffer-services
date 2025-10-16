@@ -620,24 +620,7 @@ export default new Worker<OwnerDiscoveryJob>(
         });
       }
 
-      const occupants = Array.from(occupantMap.values());
-      if (occupants.length !== openRegisterOccupants.length) {
-        const occupantsForLog = occupants.map((occ) => ({
-          fullName: occ.fullName,
-          firstName: occ.firstName,
-          lastName: occ.lastName,
-          firstSeenYear: occ.firstSeenYear,
-          lastSeenYear: occ.lastSeenYear,
-          dataSources: occ.dataSources,
-          indicators: occ.indicators,
-        }));
-        await logEvent(jobId, 'info', 'Occupant list expanded with Companies House data', {
-          openRegisterCount: openRegisterOccupants.length,
-          total: occupants.length,
-          added: occupants.length - openRegisterOccupants.length,
-          occupants: occupantsForLog,
-        });
-      }
+      
 
       const officerNames = new Set<string>();
       // Track size and added keys before adding officer hits
@@ -679,6 +662,25 @@ export default new Worker<OwnerDiscoveryJob>(
 
         const { added, key: occKey } = addOrMergeOccupant(occupantMap, occ);
         if (added) addedKeysFromOfficers.push(occKey);
+      }
+
+      const occupants = Array.from(occupantMap.values());
+      if (occupants.length !== openRegisterOccupants.length) {
+        const occupantsForLog = occupants.map((occ) => ({
+          fullName: occ.fullName,
+          firstName: occ.firstName,
+          lastName: occ.lastName,
+          firstSeenYear: occ.firstSeenYear,
+          lastSeenYear: occ.lastSeenYear,
+          dataSources: occ.dataSources,
+          indicators: occ.indicators,
+        }));
+        await logEvent(jobId, 'info', 'Occupant list expanded with Companies House data', {
+          openRegisterCount: openRegisterOccupants.length,
+          total: occupants.length,
+          added: occupants.length - openRegisterOccupants.length,
+          occupants: occupantsForLog,
+        });
       }
 
       const afterOfficerAddSize = occupantMap.size;
