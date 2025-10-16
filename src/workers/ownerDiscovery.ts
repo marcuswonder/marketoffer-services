@@ -704,6 +704,25 @@ export default new Worker<OwnerDiscoveryJob>(
         added: addedOccupantsForLog,
       });
 
+      const allOccupantsForLog = Array.from(occupantMap.entries()).map(([key, occ]) => ({
+        key,
+        fullName: occ.fullName,
+        firstName: occ.firstName,
+        lastName: occ.lastName,
+        firstSeenYear: occ.firstSeenYear,
+        lastSeenYear: occ.lastSeenYear,
+        dataSources: occ.dataSources,
+        indicators: occ.indicators,
+      }));
+
+      await logEvent(jobId, 'info', 'All occupant candidates before scoring', {
+        total: occupantMap.size,
+        openRegisterCount: openRegisterOccupants.length,
+        addedFromCompaniesHouse:
+          occupantMap.size - openRegisterOccupants.length,
+        occupants: allOccupantsForLog,
+      });
+
       const confirmedMatches = new Set<string>(chAffiliatedNames);
       for (const occ of occupants) {
         const norm = normalizeName(occ.fullName);
