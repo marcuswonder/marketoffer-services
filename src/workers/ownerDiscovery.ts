@@ -4,8 +4,8 @@ import { connection, chQ, companyQ } from '../queues/index.js';
 import { initDb, startJob, logEvent, completeJob, failJob } from '../lib/progress.js';
 import { query } from '../lib/db.js';
 import { AddressInput, prettyAddress, addressKey } from '../lib/address.js';
-import { findCorporateOwner, searchCorporateOwnersByPostcode } from '../lib/landRegistry.js';
-import type { CorporateOwnerRecord, CorporateOwnerMatch } from '../lib/landRegistry.js';
+import { findCorporateOwner, searchCorporateOwnersByPostcode, fetchPricePaidTransactionsByPostcode } from '../lib/landRegistry.js';
+import type { CorporateOwnerRecord, CorporateOwnerMatch, PricePaidTransaction } from '../lib/landRegistry.js';
 import { lookupOpenRegister } from '../lib/openRegister.js';
 import type { OccupantRecord } from '../lib/openRegister.js';
 import { scoreOccupants } from '../lib/homeownerRubric.js';
@@ -89,6 +89,144 @@ function normalizeForMatch(input: string): string {
 
 function tokens(value: string): string[] {
   return normalizeForMatch(value).split(' ').filter(Boolean);
+}
+
+function pricePaidCandidateVariants(tx: PricePaidTransaction): Array<{ raw: string; normalized: string; tokens: Set<string> }> {
+  const variants = new Set<string>();
+  const paon = (tx.paon || '').toString();
+  const saon = (tx.saon || '').toString();
+  const street = (tx.street || '').toString();
+  const town = (tx.town || '').toString();
+
+  const add = (val: string) => {
+    const trimmed = val.trim();
+    if (!trimmed) return;
+    variants.add(trimmed);
+  };
+
+  if (paon && street) add(`${paon} ${street}`);
+  if (saon && paon && street) add(`${saon} ${paon} ${street}`);
+  if (saon && street) add(`${saon} ${street}`);
+  if (street) add(street);
+  if (paon) add(paon);
+  if (saon) add(saon);
+  if (street && town) add(`${street} ${town}`);
+
+  return Array.from(variants)
+    .map((val) => {
+      const normalized = normalizeForMatch(val);
+      return {
+        raw: val,
+        normalized,
+        tokens: new Set(tokens(normalized)),
+      };
+    })
+    .filter((entry) => entry.tokens.size > 0);
+}
+
+function choosePricePaidTransaction(
+  address: AddressInput,
+  transactions: PricePaidTransaction[]
+): { transaction: PricePaidTransaction; score: number; sharedTokens: number; targetVariant: string; candidateVariant: string } | null {
+  if (!transactions.length) return null;
+  const targetVariants = buildTargetVariants(address).map((value) => ({
+    raw: value,
+    tokens: new Set(tokens(value)),
+    numericTokens: tokens(value).filter((token) => /\d/.test(token)),
+  }));
+  if (!targetVariants.length) return null;
+
+  type MatchResult = {
+    transaction: PricePaidTransaction;
+    score: number;
+    sharedTokens: number;
+    targetVariant: string;
+    candidateVariant: string;
+    timestamp: number;
+  };
+
+  const parseTimestamp = (value?: string): number => {
+    if (!value) return Number.NEGATIVE_INFINITY;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+    const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) {
+      const year = Number(match[1]);
+      const month = Number(match[2]) - 1;
+      const day = Number(match[3]);
+      return Date.UTC(year, month, day);
+    }
+    return Number.NEGATIVE_INFINITY;
+  };
+
+  let best: MatchResult | null = null;
+
+  for (const transaction of transactions) {
+    const variants = pricePaidCandidateVariants(transaction);
+    if (!variants.length) continue;
+    const timestamp = parseTimestamp(transaction.date);
+
+    for (const candidate of variants) {
+      if (!candidate.tokens.size) continue;
+      for (const target of targetVariants) {
+        if (!target.tokens.size) continue;
+        let shared = 0;
+        for (const token of target.tokens) {
+          if (candidate.tokens.has(token)) shared += 1;
+        }
+        if (!shared) continue;
+
+        const numericTokens = target.numericTokens;
+        if (numericTokens.length) {
+          let numericMatch = true;
+          for (const token of numericTokens) {
+            if (!candidate.tokens.has(token)) {
+              numericMatch = false;
+              break;
+            }
+          }
+          if (!numericMatch) continue;
+        }
+
+        const missing = target.tokens.size - shared;
+        const extra = candidate.tokens.size - shared;
+        const score = shared * 10 - missing * 5 - extra;
+
+        if (
+          !best ||
+          score > best.score ||
+          (score === best.score && timestamp > best.timestamp)
+        ) {
+          best = {
+            transaction,
+            score,
+            sharedTokens: shared,
+            targetVariant: target.raw,
+            candidateVariant: candidate.raw,
+            timestamp,
+          };
+        }
+      }
+    }
+  }
+
+  return best
+    ? {
+        transaction: best.transaction,
+        score: best.score,
+        sharedTokens: best.sharedTokens,
+        targetVariant: best.targetVariant,
+        candidateVariant: best.candidateVariant,
+      }
+    : null;
+}
+
+function extractSaleYear(dateStr?: string): number | undefined {
+  if (!dateStr) return undefined;
+  const match = dateStr.match(/^(\d{4})/);
+  if (!match) return undefined;
+  const year = Number(match[1]);
+  return Number.isFinite(year) ? year : undefined;
 }
 
 function buildTargetVariants(address: AddressInput): string[] {
@@ -411,6 +549,48 @@ export default new Worker<OwnerDiscoveryJob>(
         source: register?.source || null,
         openRegisterOccupants: openRegisterOccupants || null,
       });
+
+      let pricePaidTransactions: PricePaidTransaction[] = [];
+      let pricePaidMatch: ReturnType<typeof choosePricePaidTransaction> | null = null;
+      let latestSaleYear: number | undefined;
+      let latestSaleDate: string | undefined;
+      if (address.postcode) {
+        pricePaidTransactions = await fetchPricePaidTransactionsByPostcode(address.postcode);
+        pricePaidMatch = choosePricePaidTransaction(address, pricePaidTransactions);
+        if (pricePaidMatch?.transaction?.date) {
+          latestSaleDate = pricePaidMatch.transaction.date;
+          latestSaleYear = extractSaleYear(pricePaidMatch.transaction.date);
+        }
+        await logEvent(jobId, 'info', 'Land Registry price paid search', {
+          postcode: address.postcode,
+          transactionCount: pricePaidTransactions.length,
+          latestSaleDate: latestSaleDate || null,
+          latestSaleYear: latestSaleYear ?? null,
+          matchedTransaction: pricePaidMatch
+            ? {
+                amount: pricePaidMatch.transaction.amount ?? null,
+                date: pricePaidMatch.transaction.date ?? null,
+                paon: pricePaidMatch.transaction.paon ?? null,
+                saon: pricePaidMatch.transaction.saon ?? null,
+                street: pricePaidMatch.transaction.street ?? null,
+                score: pricePaidMatch.score,
+                targetVariant: pricePaidMatch.targetVariant,
+                candidateVariant: pricePaidMatch.candidateVariant,
+              }
+            : null,
+          sampleTransactions: pricePaidTransactions.slice(0, 5).map((tx) => ({
+            amount: tx.amount ?? null,
+            date: tx.date ?? null,
+            paon: tx.paon ?? null,
+            saon: tx.saon ?? null,
+            street: tx.street ?? null,
+          })),
+        });
+      } else {
+        await logEvent(jobId, 'warn', 'Land Registry price paid search skipped (no postcode)', {
+          address: prettyAddress(address),
+        });
+      }
       
       if (rootJobId && openRegisterOccupants.length) {
         await logEvent(rootJobId, 'info', 'Occupants located', {
@@ -620,8 +800,6 @@ export default new Worker<OwnerDiscoveryJob>(
         });
       }
 
-      
-
       const officerNames = new Set<string>();
       // Track size and added keys before adding officer hits
       const beforeOfficerAddSize = occupantMap.size;
@@ -736,10 +914,11 @@ export default new Worker<OwnerDiscoveryJob>(
       await logEvent(jobId, 'debug', 'Scoring inputs', {
         occupantCount: occupants.length,
         confirmedMatches: Array.from(confirmedMatches),
+        latestSaleYear: latestSaleYear ?? null,
       });
 
       // Step 3: Apply rubric scoring (using confirmed matches to boost scores)
-      const candidates = scoreOccupants(occupants, { confirmedMatches });
+      const candidates = scoreOccupants(occupants, { confirmedMatches, latestSaleYear });
       await logEvent(jobId, 'info', 'Scoring results', {
         totalCandidates: candidates.length,
         topFive: candidates.slice(0, 5).map(c => ({

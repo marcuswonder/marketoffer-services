@@ -22,6 +22,19 @@ export type CorporateOwnerMatch = {
   raw?: any;
 };
 
+export type PricePaidTransaction = {
+  paon?: string;
+  saon?: string;
+  street?: string;
+  town?: string;
+  county?: string;
+  postcode?: string;
+  amount?: number;
+  date?: string;
+  category?: string;
+  raw?: any;
+};
+
 type DatasetConfig = {
   label: string;
   fileSource?: string;
@@ -33,6 +46,7 @@ const DEFAULT_REFRESH_MONTHS = Math.max(1, Number(process.env.LAND_REGISTRY_CORP
 const DEFAULT_REFRESH_MS = DEFAULT_REFRESH_MONTHS * 30 * 24 * 60 * 60 * 1000;
 const API_KEY = (process.env.LAND_REGISTRY_API_KEY || '').trim();
 const API_BASE = (process.env.LAND_REGISTRY_API_BASE || 'https://use-land-property-data.service.gov.uk/api').replace(/\/$/, '');
+const PRICE_PAID_ENDPOINT = (process.env.LAND_REGISTRY_PRICE_PAID_ENDPOINT || 'https://landregistry.data.gov.uk/landregistry/query').replace(/\/$/, '');
 
 const DATASET_CONFIGS: DatasetConfig[] = [
   {
@@ -56,6 +70,117 @@ const API_SEARCH_BASES = [
 
 let datasetCache: Map<string, CorporateOwnerRecord> | null = null;
 let datasetCacheLoaded = false;
+
+function formatPostcodeForQuery(postcode: string): string | null {
+  const normalized = normalizePostcode(postcode);
+  if (!normalized) return null;
+  if (normalized.length <= 3) return normalized;
+  const outward = normalized.slice(0, normalized.length - 3);
+  const inward = normalized.slice(-3);
+  return `${outward} ${inward}`;
+}
+
+export async function fetchPricePaidTransactionsByPostcode(
+  postcode: string
+): Promise<PricePaidTransaction[]> {
+  const formattedPostcode = formatPostcodeForQuery(postcode);
+  if (!formattedPostcode) return [];
+
+  const prefixes = [
+    'PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>',
+    'PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>',
+    'PREFIX owl: <http://www.w3.org/2002/07/owl#>',
+    'PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>',
+    'PREFIX sr: <http://data.ordnancesurvey.co.uk/ontology/spatialrelations/>',
+    'PREFIX ukhpi: <http://landregistry.data.gov.uk/def/ukhpi/>',
+    'PREFIX lrppi: <http://landregistry.data.gov.uk/def/ppi/>',
+    'PREFIX skos: <http://www.w3.org/2004/02/skos/core#>',
+    'PREFIX lrcommon: <http://landregistry.data.gov.uk/def/common/>',
+  ].join('\n');
+
+  const sparqlQuery = `${prefixes}
+
+SELECT ?paon ?saon ?street ?town ?county ?postcode ?amount ?date ?category
+WHERE
+{
+  VALUES ?postcode {"${formattedPostcode}"^^xsd:string}
+
+  ?addr lrcommon:postcode ?postcode.
+
+  ?transx lrppi:propertyAddress ?addr ;
+          lrppi:pricePaid ?amount ;
+          lrppi:transactionDate ?date ;
+          lrppi:transactionCategory/skos:prefLabel ?category.
+
+  OPTIONAL {?addr lrcommon:county ?county}
+  OPTIONAL {?addr lrcommon:paon ?paon}
+  OPTIONAL {?addr lrcommon:saon ?saon}
+  OPTIONAL {?addr lrcommon:street ?street}
+  OPTIONAL {?addr lrcommon:town ?town}
+}
+ORDER BY DESC(?date)
+`;
+
+  try {
+    const params = new URLSearchParams();
+    params.set('query', sparqlQuery);
+
+    const res = await fetch(PRICE_PAID_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/sparql-results+json',
+      },
+      body: params.toString(),
+    });
+
+    if (!res.ok) {
+      logger.warn(
+        { status: res.status, postcode: formattedPostcode },
+        'Land Registry price paid data request failed'
+      );
+      return [];
+    }
+
+    const json: any = await res.json();
+    const bindings: any[] = Array.isArray(json?.results?.bindings) ? json.results.bindings : [];
+    const literal = (binding: any, key: string): string | undefined => {
+      if (!binding || typeof binding !== 'object') return undefined;
+      const entry = binding[key];
+      if (!entry || typeof entry !== 'object') return undefined;
+      const value = entry.value;
+      return typeof value === 'string' ? value.trim() : undefined;
+    };
+    const toNumber = (value: string | undefined): number | undefined => {
+      if (value == null) return undefined;
+      const num = Number(value);
+      return Number.isFinite(num) ? num : undefined;
+    };
+
+    return bindings.map((binding: any) => {
+      const amount = toNumber(literal(binding, 'amount'));
+      const transactionDate = literal(binding, 'date');
+      return {
+        paon: literal(binding, 'paon'),
+        saon: literal(binding, 'saon'),
+        street: literal(binding, 'street'),
+        town: literal(binding, 'town'),
+        county: literal(binding, 'county'),
+        postcode: literal(binding, 'postcode') || formattedPostcode,
+        amount,
+        date: transactionDate,
+        category: literal(binding, 'category'),
+        raw: binding,
+      };
+    });
+  } catch (err) {
+    logger.warn(
+      { postcode: formattedPostcode, error: err instanceof Error ? err.message : String(err) },
+      'Land Registry price paid data request threw'
+    );
+    return [];
+  }
+}
 
 function tokenizeAddress(value: string | undefined | null): string[] {
   if (!value) return [];

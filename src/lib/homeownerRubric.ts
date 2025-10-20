@@ -23,6 +23,7 @@ export type RubricCandidate = {
 export type RubricOptions = {
   confirmedMatches?: Set<string>; // normalised full names
   corporateOccupancy?: boolean;
+  latestSaleYear?: number;
 };
 
 const NOW_YEAR = new Date().getFullYear();
@@ -84,6 +85,9 @@ export function scoreOccupants(records: OccupantRecord[], opts: RubricOptions = 
   if (opts.confirmedMatches) {
     for (const n of opts.confirmedMatches) confirmed.add(normalizeName(n));
   }
+  const latestSaleYear = typeof opts.latestSaleYear === 'number' && Number.isFinite(opts.latestSaleYear)
+    ? opts.latestSaleYear
+    : null;
 
   const candidates: RubricCandidate[] = records.map((rec) => {
     const signals: RubricSignal[] = [];
@@ -139,6 +143,53 @@ export function scoreOccupants(records: OccupantRecord[], opts: RubricOptions = 
 
     const lastY  = typeof rec.lastSeenYear  === 'number' ? rec.lastSeenYear  : null;
     const firstY = typeof rec.firstSeenYear === 'number' ? rec.firstSeenYear : null;
+
+    if (latestSaleYear && firstY) {
+      const diff = firstY - latestSaleYear;
+      const reasonBase = `saleYear=${latestSaleYear}, firstSeen=${firstY}${lastY ? `, lastSeen=${lastY}` : ''}`;
+      if (diff >= 0) {
+        let weight = 0;
+        let value = 0;
+        if (diff <= 1) {
+          weight = 0.18;
+          value = 1;
+        } else if (diff <= 3) {
+          weight = 0.14;
+          value = 0.7;
+        } else if (diff <= 6) {
+          weight = 0.10;
+          value = 0.4;
+        } else if (diff <= 10) {
+          weight = 0.06;
+          value = 0.2;
+        }
+        if (weight > 0) {
+          pushSignal(signals, {
+            id: 'sale_firstseen_alignment',
+            label: 'First seen aligns with latest sale',
+            weight,
+            value,
+            reason: reasonBase,
+          });
+        }
+      } else {
+        const yearsBefore = Math.abs(diff);
+        let value = -0.3;
+        if (yearsBefore >= 5) value = -0.6;
+        else if (yearsBefore >= 3) value = -0.4;
+        let weight = 0.12;
+        if (lastY && lastY >= latestSaleYear) {
+          value *= 0.5; // Occupant persisted after sale, soften penalty
+        }
+        pushSignal(signals, {
+          id: 'sale_firstseen_mismatch',
+          label: 'Open Register presence predates latest sale',
+          weight,
+          value,
+          reason: reasonBase,
+        });
+      }
+    }
 
     // Compute age at the time the person was first seen at the property
     const ageAtFirstSeen: number | null = (function() {
