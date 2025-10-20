@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fetch } from 'undici';
 import { logger } from './logger.js';
-import { AddressInput, addressKey, prettyAddress, normalizePostcode } from './address.js';
+import { AddressInput, prettyAddress, normalizePostcode, addressVariants } from './address.js';
 
 export type OccupantRecord = {
   firstName: string;
@@ -39,19 +39,180 @@ function mergeName(first: string, last: string): string {
   return `${first || ''} ${last || ''}`.trim();
 }
 
+function normalizeFragment(value: any): string {
+  if (value == null) return '';
+  return String(value)
+    .toLowerCase()
+    .replace(/[\u2013\u2014\-\/]/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function collectTokens(values: any[]): Set<string> {
+  const tokens = new Set<string>();
+  for (const value of values) {
+    const normalized = normalizeFragment(value);
+    if (!normalized) continue;
+    normalized.split(' ').forEach((token) => {
+      if (token) tokens.add(token);
+    });
+  }
+  return tokens;
+}
+
+type AddressVariantDetail = {
+  raw: string;
+  tokens: Set<string>;
+  numericTokens: string[];
+};
+
+function buildVariantDetails(address: AddressInput): AddressVariantDetail[] {
+  return addressVariants(address)
+    .map((raw) => {
+      const tokenList = Array.from(collectTokens([raw]));
+      if (!tokenList.length) return null;
+      const tokens = new Set(tokenList);
+      const numericTokens = tokenList.filter((token) => /\d/.test(token));
+      return { raw, tokens, numericTokens };
+    })
+    .filter((detail): detail is AddressVariantDetail => !!detail);
+}
+
+type PremisesMatch = {
+  item: any;
+  score: number;
+  sharedTokens: number;
+  targetVariant: string;
+  candidateTokens: string[];
+  candidatePostcode?: string | null;
+};
+
+function choosePremisesMatch(
+  variants: AddressVariantDetail[],
+  premisesList: any[],
+  targetPostcode: string | null
+): PremisesMatch | null {
+  if (!premisesList.length || !variants.length) return null;
+  let best: PremisesMatch | null = null;
+  for (const item of premisesList) {
+    if (!item || typeof item !== 'object') continue;
+    const candidateStrings: any[] = [
+      item.full_address,
+      item.address,
+      item.premises,
+      item.premise,
+      item.premises_name,
+      item.building_name,
+      item.sub_building_name,
+      item.secondary_addressable_object_name,
+      item.secondary_addressable_object,
+      item.primary_addressable_object_name,
+      item.primary_addressable_object,
+      item.saon,
+      item.paon,
+      item.street,
+      item.thoroughfare,
+      item.locality,
+      item.town,
+      item.post_town,
+    ];
+    const candidateTokens = collectTokens(candidateStrings);
+    if (!candidateTokens.size) continue;
+    const candidatePostcode = normalizePostcode(item.postcode || item.post_code || item.post_code_in || item.postcode_in);
+    const postcodeMatches = Boolean(
+      targetPostcode &&
+        candidatePostcode &&
+        candidatePostcode === targetPostcode
+    );
+    const postcodeMismatch = Boolean(
+      targetPostcode &&
+        candidatePostcode &&
+        candidatePostcode !== targetPostcode
+    );
+    for (const variant of variants) {
+      if (variant.numericTokens.length) {
+        const numericOk = variant.numericTokens.every((token) => candidateTokens.has(token));
+        if (!numericOk) continue;
+      }
+      let shared = 0;
+      variant.tokens.forEach((token) => {
+        if (candidateTokens.has(token)) shared += 1;
+      });
+      if (!shared) continue;
+      const missing = variant.tokens.size - shared;
+      const extra = candidateTokens.size - shared;
+      let score = shared * 10 - missing * 5 - extra;
+      if (postcodeMatches) score += 8;
+      if (postcodeMismatch) score -= 10;
+      if (!best || score > best.score) {
+        best = {
+          item,
+          score,
+          sharedTokens: shared,
+          targetVariant: variant.raw,
+          candidateTokens: Array.from(candidateTokens),
+          candidatePostcode,
+        };
+      }
+    }
+  }
+  return best;
+}
+
+function matchesAddressTokens(
+  fields: any[],
+  candidatePostcode: string | null,
+  targetTokens: Set<string>,
+  targetNumericTokens: string[],
+  targetPostcode: string | null
+): boolean {
+  if (!targetTokens.size) return true;
+  const candidateTokens = collectTokens(fields);
+  if (!candidateTokens.size) return true;
+  if (targetPostcode && candidatePostcode && targetPostcode !== candidatePostcode) return false;
+  if (targetNumericTokens.length) {
+    for (const token of targetNumericTokens) {
+      if (!candidateTokens.has(token)) return false;
+    }
+  }
+  let shared = 0;
+  targetTokens.forEach((token) => {
+    if (candidateTokens.has(token)) shared += 1;
+  });
+  if (shared >= Math.min(targetTokens.size, 3)) return true;
+  const coverage = shared / targetTokens.size;
+  return shared >= 2 && coverage >= 0.5;
+}
+
 export async function lookupOpenRegister(address: AddressInput): Promise<OpenRegisterResult | null> {
   const pretty = prettyAddress(address);
+  const variantDetails = buildVariantDetails(address);
+  const targetTokens = new Set<string>();
+  const targetNumericTokens = new Set<string>();
+  for (const detail of variantDetails) {
+    detail.tokens.forEach((token) => targetTokens.add(token));
+    detail.numericTokens.forEach((token) => targetNumericTokens.add(token));
+  }
+  const targetNumericTokenList = Array.from(targetNumericTokens);
+  const targetPostcode = normalizePostcode(address.postcode);
 
   const apiKey = process.env.T2A_API_KEY;
   const apiBase = process.env.T2A_BASE_URL || 'https://api.t2a.io/rest/rest.aspx';
   if (apiKey) {
     try {
-      const premisesParts = [address.line1, address.line2].map(s => (s || '').trim()).filter(Boolean);
+      const premisesParts = [address.unit, address.buildingName, address.line1].map(s => (s || '').trim()).filter(Boolean);
       const premises = premisesParts.join(' ');
+      const street = (address.line2 || '').trim();
       const url = new URL(apiBase);
       url.searchParams.set('method', 'address_person');
       url.searchParams.set('api_key', apiKey);
-      if (premises) url.searchParams.set('premises', premises);
+      if (premises) {
+        url.searchParams.set('premises', premises);
+      } else if (street) {
+        url.searchParams.set('premises', street);
+      }
+      if (street) url.searchParams.set('street', street);
       if (address.postcode) url.searchParams.set('postcode', address.postcode.trim());
       if (address.city) url.searchParams.set('town', address.city.trim());
       url.searchParams.set('output', 'json');
@@ -69,7 +230,21 @@ export async function lookupOpenRegister(address: AddressInput): Promise<OpenReg
         } else {
           const personList = Array.isArray(json?.person_list) ? json.person_list : [];
           const premisesList = Array.isArray(json?.premises_list) ? json.premises_list : [];
-
+          const matchedPremises = choosePremisesMatch(variantDetails, premisesList, targetPostcode);
+          if (matchedPremises) {
+            logger.debug(
+              {
+                address: pretty,
+                matchedPremises: {
+                  score: matchedPremises.score,
+                  sharedTokens: matchedPremises.sharedTokens,
+                  targetVariant: matchedPremises.targetVariant,
+                  candidatePostcode: matchedPremises.candidatePostcode || null,
+                },
+              },
+              'Open register premises match selected'
+            );
+          }
           const records: OccupantRecord[] = [];
 
           const toYear = (value: any): number | undefined => {
@@ -93,6 +268,32 @@ export async function lookupOpenRegister(address: AddressInput): Promise<OpenReg
 
           const addFromPerson = (item: any) => {
             if (!item || typeof item !== 'object') return;
+            const candidatePostcode = normalizePostcode(item.postcode || item.post_code || item.property_postcode || item.postcode_in);
+            const addressFields: any[] = [
+              item.property_address,
+              item.address,
+              item.full_address,
+              item.premises,
+              item.premise,
+              item.street,
+              item.thoroughfare,
+              item.saon,
+              item.paon,
+            ];
+            if (Array.isArray(item.address_lines)) {
+              addressFields.push(...item.address_lines);
+            }
+            if (
+              !matchesAddressTokens(
+                addressFields,
+                candidatePostcode,
+                targetTokens,
+                targetNumericTokenList,
+                targetPostcode
+              )
+            ) {
+              return;
+            }
             const firstName = String(
               item.first_name ||
                 item.firstname ||
@@ -143,6 +344,33 @@ export async function lookupOpenRegister(address: AddressInput): Promise<OpenReg
 
           const addFromPremises = (item: any) => {
             if (!item || typeof item !== 'object') return;
+            const candidatePostcode = normalizePostcode(item.postcode || item.post_code || item.postcode_in);
+            const addressFields: any[] = [
+              item.full_address,
+              item.address,
+              item.premises,
+              item.premise,
+              item.premises_name,
+              item.secondary_addressable_object_name,
+              item.secondary_addressable_object,
+              item.primary_addressable_object_name,
+              item.primary_addressable_object,
+              item.saon,
+              item.paon,
+              item.street,
+              item.thoroughfare,
+            ];
+            if (
+              !matchesAddressTokens(
+                addressFields,
+                candidatePostcode,
+                targetTokens,
+                targetNumericTokenList,
+                targetPostcode
+              )
+            ) {
+              return;
+            }
             const name = String(item.occupant_name || item.name || item.full_name || '').trim();
             if (!name) return;
             const parts = name.split(/\s+/).filter(Boolean);

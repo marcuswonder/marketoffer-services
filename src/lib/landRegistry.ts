@@ -205,6 +205,8 @@ function addressTokensFromRecord(record: CorporateOwnerRecord): Set<string> {
   addTokens(raw?.property_address || raw?.Property_Address);
   addTokens(raw?.address || raw?.Address);
   addTokens(raw?.premises);
+  addTokens(raw?.saon);
+  addTokens(raw?.paon);
 
   const rawAddressLines = Array.isArray(raw?.address_lines) ? raw.address_lines : [];
   rawAddressLines.forEach((line: any) => addTokens(typeof line === 'string' ? line : ''));
@@ -219,13 +221,13 @@ function addressMatchesInput(record: CorporateOwnerRecord, address: AddressInput
   const candidateTokens = addressTokensFromRecord(record);
   if (!candidateTokens.size) return false;
 
-  const primaryTokens = tokenizeAddress(address.line1);
-  if (!primaryTokens.length) return false;
-
-  const secondaryTokens = tokenizeAddress(address.line2 || '');
-  const requiredTokens = secondaryTokens.length
-    ? Array.from(new Set([...primaryTokens, ...secondaryTokens]))
-    : primaryTokens;
+  const requiredTokenSet = new Set<string>();
+  tokenizeAddress(address.unit).forEach((token) => requiredTokenSet.add(token));
+  tokenizeAddress(address.buildingName).forEach((token) => requiredTokenSet.add(token));
+  tokenizeAddress(address.line1).forEach((token) => requiredTokenSet.add(token));
+  tokenizeAddress(address.line2).forEach((token) => requiredTokenSet.add(token));
+  if (!requiredTokenSet.size) return false;
+  const requiredTokens = Array.from(requiredTokenSet);
 
   const numericTokens = requiredTokens.filter((token) => /\d/.test(token));
   if (numericTokens.length && !numericTokens.every((token) => candidateTokens.has(token))) {

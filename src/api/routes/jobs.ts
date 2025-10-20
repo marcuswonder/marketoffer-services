@@ -85,13 +85,19 @@ router.post("/jobs/person-linkedin", async (req, res) => {
 });
 
 router.post("/jobs/owner-discovery", async (req, res) => {
+  const optionalTrimmed = z.string().trim().transform((val) => (val === '' ? undefined : val)).optional();
+  const requiredLine = z.string().trim().min(1);
+  const requiredCity = z.string().trim().min(1);
+  const requiredPostcode = z.string().trim().min(3);
   const schema = z.object({
     address: z.object({
-      line1: z.string().min(1),
-      line2: z.string().optional(),
-      city: z.string().optional(),
-      postcode: z.string().min(3),
-      country: z.string().optional(),
+      unit: optionalTrimmed,
+      buildingName: optionalTrimmed,
+      line1: requiredLine,
+      line2: optionalTrimmed,
+      city: requiredCity,
+      postcode: requiredPostcode,
+      country: optionalTrimmed,
     }),
     rootJobId: z.string().optional(),
     metadata: z.record(z.any()).optional(),

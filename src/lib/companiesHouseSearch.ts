@@ -15,7 +15,7 @@ function tokenize(value: string): string[] {
     .trim();
   if (!cleaned) return [];
   const tokens = cleaned.split(' ').filter(Boolean);
-  const stop = new Set(['ltd', 'limited', 'uk', 'unit', 'the']);
+  const stop = new Set(['ltd', 'limited', 'uk', 'the']);
   return Array.from(new Set(tokens.filter((token) => !stop.has(token))));
 }
 
@@ -40,6 +40,8 @@ type AddressMatchDetail = {
   matched: boolean;
   reasons: string[];
   candidateAddress: {
+    unit?: string;
+    buildingName?: string;
     line1?: string;
     line2?: string;
     locality?: string;
@@ -63,6 +65,8 @@ function scoreAddressMatch(target: AddressInput, candidate: any): AddressMatchDe
   }
 
   const candidateAddress = {
+    unit: candidate.saon || candidate.sub_building_name || candidate.po_box || candidate.care_of || '',
+    buildingName: candidate.building_name || candidate.premises || candidate.organisation_name || '',
     line1: candidate.address_line_1 || candidate.premises || candidate.care_of || '',
     line2: candidate.address_line_2 || candidate.address_line_3 || candidate.street_address || candidate.address_snippet || '',
     locality: candidate.locality || candidate.town || candidate.post_town || '',
@@ -71,10 +75,12 @@ function scoreAddressMatch(target: AddressInput, candidate: any): AddressMatchDe
   };
 
   const targetTokens = Array.from(
-    buildTokenSet(target.line1, target.line2, target.city)
+    buildTokenSet(target.unit, target.buildingName, target.line1, target.line2, target.city)
   );
   const candidateTokens = Array.from(
     buildTokenSet(
+      candidateAddress.unit,
+      candidateAddress.buildingName,
       candidateAddress.line1,
       candidateAddress.line2,
       candidateAddress.locality,
@@ -177,6 +183,8 @@ export type CompanyAddressHit = {
   matchReasons: string[];
   matched: boolean;
   candidateAddress: {
+    unit?: string;
+    buildingName?: string;
     line1?: string;
     line2?: string;
     locality?: string;
@@ -209,7 +217,8 @@ export async function searchCompaniesByAddress(jobId: string, address: AddressIn
     logger.debug('Skipping CH company search; no API key');
     return [];
   }
-  const q = encodeURIComponent(`${address.line1} ${address.postcode}`.trim());
+  const queryParts = [address.unit, address.buildingName, address.line1, address.line2, address.city, address.postcode].filter((part) => typeof part === 'string' && part.trim().length);
+  const q = encodeURIComponent(queryParts.join(' ').trim());
   const endpoint = `/search/companies?q=${q}&items_per_page=50`;
   try {
     const json = await chGetJson<any>(endpoint, { retries: 2 });
@@ -287,7 +296,8 @@ export async function searchOfficersByAddress(jobId: string, address: AddressInp
     logger.debug('Skipping CH officer search; no API key');
     return [];
   }
-  const q = encodeURIComponent(`${address.line1} ${address.postcode}`.trim());
+  const queryParts = [address.unit, address.buildingName, address.line1, address.line2, address.city, address.postcode].filter((part) => typeof part === 'string' && part.trim().length);
+  const q = encodeURIComponent(queryParts.join(' ').trim());
   const endpoint = `/search/officers?q=${q}&items_per_page=50`;
   try {
     const json = await chGetJson<any>(endpoint, { retries: 2 });

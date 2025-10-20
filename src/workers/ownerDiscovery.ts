@@ -3,7 +3,7 @@ import { Worker } from 'bullmq';
 import { connection, chQ, companyQ } from '../queues/index.js';
 import { initDb, startJob, logEvent, completeJob, failJob } from '../lib/progress.js';
 import { query } from '../lib/db.js';
-import { AddressInput, prettyAddress, addressKey } from '../lib/address.js';
+import { AddressInput, prettyAddress, addressKey, addressVariants } from '../lib/address.js';
 import { findCorporateOwner, searchCorporateOwnersByPostcode, fetchPricePaidTransactionsByPostcode } from '../lib/landRegistry.js';
 import type { CorporateOwnerRecord, CorporateOwnerMatch, PricePaidTransaction } from '../lib/landRegistry.js';
 import { lookupOpenRegister } from '../lib/openRegister.js';
@@ -230,19 +230,16 @@ function extractSaleYear(dateStr?: string): number | undefined {
 }
 
 function buildTargetVariants(address: AddressInput): string[] {
-  const variants = new Set<string>();
-  const lines = [address.line1, address.line2].filter(Boolean) as string[];
-  if (lines.length) variants.add(lines.join(' '));
-  if (lines.length > 1) variants.add([...lines].reverse().join(' '));
-  variants.add(address.line1);
-  if (address.line2) variants.add(address.line2);
-  if (address.city) {
-    variants.add(`${address.line1} ${address.city}`);
-    if (lines.length) variants.add(`${lines.join(' ')} ${address.city}`);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const fragment of addressVariants(address)) {
+    const normalized = normalizeForMatch(fragment);
+    if (normalized.length > 2 && !seen.has(normalized)) {
+      seen.add(normalized);
+      out.push(normalized);
+    }
   }
-  return Array.from(variants)
-    .map(normalizeForMatch)
-    .filter((value) => value.length > 2);
+  return out;
 }
 
 function extractCandidateVariants(record: CorporateOwnerRecord): Array<{ raw: string; normalized: string }> {
@@ -374,15 +371,35 @@ function addOrMergeOccupant(
 
 function addressInputFromChAddress(addr: any): AddressInput | null {
   if (!addr) return null;
+  const pick = (...candidates: Array<any>): string | undefined => {
+    for (const c of candidates) {
+      if (typeof c === 'string') {
+        const trimmed = c.trim();
+        if (trimmed) return trimmed;
+      }
+    }
+    return undefined;
+  };
+  const unit = pick(addr.saon, addr.sub_building_name, addr.sub_building, addr.po_box, addr.care_of);
+  const buildingName = pick(addr.building_name, addr.organisation_name, addr.property_name, addr.care_of);
   const line1Parts = [addr.premises, addr.address_line_1].filter(Boolean);
-  const line1 = line1Parts.length ? line1Parts.join(' ') : (addr.address_line_1 || addr.premises || '').trim();
-  if (!line1 && !addr.postal_code) return null;
+  let line1 = line1Parts.length ? line1Parts.map((part: any) => String(part).trim()).filter(Boolean).join(' ') : pick(addr.address_line_1, addr.premises, addr.street_address);
+  let line2 = pick(addr.address_line_2, addr.street_address, addr.address_line_3, addr.thoroughfare);
+  const city = pick(addr.locality, addr.town, addr.post_town, addr.region);
+  const postcode = pick(addr.postal_code, addr.postcode, addr.post_code);
+  if (!line1 && line2) {
+    line1 = line2;
+    line2 = undefined;
+  }
+  if (!line1 && !postcode) return null;
   return {
-    line1: (line1 || '').trim(),
-    line2: (addr.address_line_2 || '').trim() || null,
-    city: (addr.locality || addr.region || '').trim() || null,
-    postcode: (addr.postal_code || '').trim(),
-    country: (addr.country || 'GB').trim(),
+    unit,
+    buildingName,
+    line1: line1 || '',
+    line2: line2,
+    city: city,
+    postcode: postcode || '',
+    country: pick(addr.country, addr.country_of_residence) || 'GB',
   } as AddressInput;
 }
 
@@ -432,13 +449,24 @@ function occupantFromCompanyPerson(
 export default new Worker<OwnerDiscoveryJob>(
   'owner-discovery',
   async (job) => {
-    const payload = job.data;
+    const rawPayload = job.data;
     const jobId = job.id as string;
-    const rootJobId = payload.rootJobId;
-    const address = payload.address;
-    if (!address?.line1 || !address?.postcode) {
-      throw new Error('Address with line1 and postcode is required');
+    const rootJobId = rawPayload.rootJobId;
+    const baseAddr = rawPayload.address;
+    if (!baseAddr?.line1 || !baseAddr?.city || !baseAddr?.postcode) {
+      throw new Error('Address requires line1, city, and postcode');
     }
+    const line2 = typeof baseAddr.line2 === 'string' ? baseAddr.line2.trim() : '';
+    const address: AddressInput = {
+      unit: baseAddr.unit?.trim() || undefined,
+      buildingName: baseAddr.buildingName?.trim() || undefined,
+      line1: baseAddr.line1.trim(),
+      line2: line2 ? line2 : undefined,
+      city: baseAddr.city.trim(),
+      postcode: baseAddr.postcode.trim(),
+      country: baseAddr.country?.trim() || baseAddr.country || 'GB',
+    };
+    const payload = { ...rawPayload, address };
     await startJob({ jobId, queue: 'owner-discovery', name: job.name, payload });
     const pretty = prettyAddress(address);
 
@@ -446,7 +474,14 @@ export default new Worker<OwnerDiscoveryJob>(
       const property = await upsertProperty(jobId, payload);
       const propertyId = property.id;
       await logEvent(jobId, 'info', 'Owner property job started', {
-        address: pretty,
+        prettyAddress: pretty,
+        unit: baseAddr.unit?.trim() || undefined,
+        buildingName: baseAddr.buildingName?.trim() || undefined,
+        line1: baseAddr.line1.trim(),
+        line2: line2 ? line2 : undefined,
+        city: baseAddr.city.trim(),
+        postcode: baseAddr.postcode.trim(),
+        country: baseAddr.country?.trim() || baseAddr.country || 'GB',
         addressKey: addressKey(address),
         propertyId,
       });

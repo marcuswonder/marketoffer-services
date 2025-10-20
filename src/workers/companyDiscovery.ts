@@ -17,9 +17,17 @@ const BEE_KEY = process.env.SCRAPINGBEE_API_KEY || "";
 const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
 const WRITE_TO_AIRTABLE = (process.env.WRITE_TO_AIRTABLE || "").toLowerCase() === 'true';
 const genericHostsPath = path.join(process.cwd(), "config", "genericHosts.json");
-const genericHosts:Set<string> = new Set(
-  (JSON.parse(fs.readFileSync(genericHostsPath, "utf-8")) as string[]).map(s => s.toLowerCase())
-);
+let genericHosts: Set<string>;
+try {
+  const rawHosts = JSON.parse(fs.readFileSync(genericHostsPath, "utf-8")) as string[];
+  genericHosts = new Set((rawHosts || []).map((s) => s.toLowerCase()));
+} catch (err) {
+  logger.warn(
+    { path: genericHostsPath, err: err instanceof Error ? err.message : String(err) },
+    'Falling back to empty generic host list'
+  );
+  genericHosts = new Set();
+}
 const sicMapPath = path.join(process.cwd(), "config", "sicCodes.json");
 const sicEntries: Array<{ code: number; key_phrases?: string[]; description?: string }> = JSON.parse(fs.readFileSync(sicMapPath, 'utf-8'));
 const sicToPhrases = new Map<string, string[]>(sicEntries.map(e => [String(e.code), Array.isArray(e.key_phrases) ? e.key_phrases : []]));
