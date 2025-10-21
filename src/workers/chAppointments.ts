@@ -20,7 +20,8 @@ type CHOfficer = {
 
 await initDb();
 export default new Worker("ch-appointments", async job => {
-  const { companyNumber, firstName, lastName, contactId } = job.data as { companyNumber: string; firstName?: string; lastName?: string; contactId?: string };
+  const { companyNumber, firstName, lastName, contactId, rootJobId } = job.data as { companyNumber: string; firstName?: string; lastName?: string; contactId?: string; rootJobId?: string };
+  const pipelineRootId = rootJobId || (job.id as string);
   // console.log("companyNumber in initDB in workers/chAppointments.ts", companyNumber);
   // console.log("firstName in initDB in workers/chAppointments.ts", firstName);
   // console.log("lastName in initDB in workers/chAppointments.ts", lastName);
@@ -32,7 +33,7 @@ export default new Worker("ch-appointments", async job => {
       const company = await chGetJson<any>(`/company/${companyNumber}`);
       // console.log("company in initDB in workers/chAppointments.ts", company);
 
-      await logEvent(job.id as string, 'info', 'Fetched company', { companyNumber, company_name: company.company_name });
+      await logEvent(job.id as string, 'info', 'Fetched company', { companyNumber, company_name: company.company_name, rootJobId: pipelineRootId });
 
       const officers = await chGetJson<any>(`/company/${companyNumber}/officers`);
       // console.log("officers in initDB in workers/chAppointments.ts", officers);
@@ -448,7 +449,7 @@ export default new Worker("ch-appointments", async job => {
            RETURNING id`,
           [
             job.id as string,
-            job.id as string,
+            pipelineRootId,
             personKey,
             e.contact_id || null,
             e.first_name || null,
@@ -551,7 +552,7 @@ export default new Worker("ch-appointments", async job => {
       const jobId = `co:${job.id}:${c.company_number}`;
       await companyQ.add(
         "discover",
-        { companyNumber: c.company_number, companyName: c.company_name, address: c.registered_address, postcode: c.registered_postcode, rootJobId: job.id },
+        { companyNumber: c.company_number, companyName: c.company_name, address: c.registered_address, postcode: c.registered_postcode, rootJobId: pipelineRootId },
         { jobId, priority: 1, attempts: 5, backoff: { type: "exponential", delay: 1500 } }
       );
       try {

@@ -838,10 +838,21 @@ export default new Worker<OwnerDiscoveryJob>(
           const chJobId = `ch-owner:${corporate.companyNumber}`;
           await chQ.add(
             'fetch',
-            { companyNumber: corporate.companyNumber },
+            {
+              companyNumber: corporate.companyNumber,
+              // Propagate the original root so all downstream jobs/logs live under the same request
+              rootJobId: rootJobId || jobId,
+              // Helpful context for downstream logging/debugging
+              source: 'owner-discovery',
+              propertyAddress: pretty,
+            },
             { jobId: chJobId, attempts: 3, backoff: { type: 'exponential', delay: 1000 } }
           );
-          await logEvent(jobId, 'info', 'Enqueued CH director lookup', { companyNumber: corporate.companyNumber, chJobId });
+          await logEvent(jobId, 'info', 'Enqueued CH director/PSC lookup with root propagation', {
+            companyNumber: corporate.companyNumber,
+            chJobId,
+            rootJobId: rootJobId || jobId,
+          });
         }
         await completeJob(jobId, {
           propertyId,
