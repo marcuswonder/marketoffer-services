@@ -3,8 +3,8 @@ import { Worker } from 'bullmq';
 import { connection, chQ, companyQ } from '../queues/index.js';
 import { initDb, startJob, logEvent, completeJob, failJob } from '../lib/progress.js';
 import { query } from '../lib/db.js';
-import { AddressInput, prettyAddress, addressKey, addressVariants } from '../lib/address.js';
-import { findCorporateOwner, searchCorporateOwnersByPostcode, fetchPricePaidTransactionsByPostcode } from '../lib/landRegistry.js';
+import { AddressInput, prettyAddress, addressKey } from '../lib/address.js';
+import { findCorporateOwner, searchCorporateOwnersByPostcode, fetchPricePaidTransactionsByPostcode, normalizeCorporateRecordAddress } from '../lib/landRegistry.js';
 import type { CorporateOwnerRecord, CorporateOwnerMatch, PricePaidTransaction } from '../lib/landRegistry.js';
 import { lookupOpenRegister } from '../lib/openRegister.js';
 import type { OccupantRecord } from '../lib/openRegister.js';
@@ -21,6 +21,7 @@ import {
   type CompanyPscRecord,
 } from '../lib/companiesHouseSearch.js';
 import { parseOfficerName } from '../lib/normalize.js';
+import { normalizeAddressFragments, NormalizedAddress } from '../lib/normalizedAddress.js';
 
 await initDb();
 
@@ -91,6 +92,59 @@ function tokens(value: string): string[] {
   return normalizeForMatch(value).split(' ').filter(Boolean);
 }
 
+// --- Address parsing helpers for corporate/Neon matching ---
+const SAON_LABELS = /\b(flat|apartment|apt|suite|unit|room|block|floor|fl|lvl|level)\b/i;
+
+function extractPaonFromFreeform(s?: string | null): string | null {
+  const str = String(s || '').toLowerCase();
+  if (!str) return null;
+  // collect all number tokens (e.g., "2", "2a", "12b")
+  const nums = str.match(/\b\d+[a-z]?\b/g);
+  if (!nums || !nums.length) return null;
+  // detect an SAON like "flat 2", "apt 3" so we can ignore it for PAON
+  const saon = extractSaonFromFreeform(str);
+  const paon = nums.find(n => n !== saon) || null;
+  return paon || null;
+}
+
+function extractSaonFromFreeform(s?: string | null): string | null {
+  const str = String(s || '').toLowerCase();
+  if (!str) return null;
+  const m = str.match(/\b(flat|apartment|apt|suite|unit|room|fl|floor|lvl|level)\b\s*(\d+[a-z]?)/i);
+  return m ? m[2].toLowerCase() : null;
+}
+
+function extractPaonFromAddressInput(addr: AddressInput): string | null {
+  // Prefer a leading number token from line1; if line1 is SAON (e.g., "Flat 2, 9 Waterfront Mews"), pick the next number from line1+line2
+  const l1 = String(addr.line1 || '').toLowerCase();
+  const l2 = String(addr.line2 || '').toLowerCase();
+  // if line1 begins with SAON label, ignore that number as PAON
+  const saon = extractSaonFromFreeform(`${addr.unit || ''} ${l1}`);
+  const all = `${l1} ${l2}`.trim();
+  const nums = all.match(/\b\d+[a-z]?\b/g) || [];
+  if (nums.length) {
+    const candidate = nums.find(n => n !== saon);
+    if (candidate) return candidate;
+  }
+  // fallback: first number in line1 or line2
+  const m1 = l1.match(/\b\d+[a-z]?\b/);
+  if (m1) return m1[0];
+  const m2 = l2.match(/\b\d+[a-z]?\b/);
+  return m2 ? m2[0] : null;
+}
+
+function extractSaonFromAddressInput(addr: AddressInput): string | null {
+  // Prefer explicit unit; otherwise parse SAON label from line1
+  const unit = String(addr.unit || '').toLowerCase();
+  if (unit && SAON_LABELS.test(unit)) {
+    const m = unit.match(/\b\d+[a-z]?\b/);
+    if (m) return m[0];
+  }
+  const l1 = String(addr.line1 || '').toLowerCase();
+  const m2 = l1.match(/\b(flat|apartment|apt|suite|unit|room|fl|floor|lvl|level)\b\s*(\d+[a-z]?)/i);
+  return m2 ? m2[2].toLowerCase() : null;
+}
+
 function pricePaidCandidateVariants(tx: PricePaidTransaction): Array<{ raw: string; normalized: string; tokens: Set<string> }> {
   const variants = new Set<string>();
   const paon = (tx.paon || '').toString();
@@ -125,11 +179,11 @@ function pricePaidCandidateVariants(tx: PricePaidTransaction): Array<{ raw: stri
 }
 
 function choosePricePaidTransaction(
-  address: AddressInput,
+  normalized: NormalizedAddress,
   transactions: PricePaidTransaction[]
 ): { transaction: PricePaidTransaction; score: number; sharedTokens: number; targetVariant: string; candidateVariant: string } | null {
   if (!transactions.length) return null;
-  const targetVariants = buildTargetVariants(address).map((value) => ({
+  const targetVariants = buildTargetVariants(normalized).map((value) => ({
     raw: value,
     tokens: new Set(tokens(value)),
     numericTokens: tokens(value).filter((token) => /\d/.test(token)),
@@ -229,16 +283,25 @@ function extractSaleYear(dateStr?: string): number | undefined {
   return Number.isFinite(year) ? year : undefined;
 }
 
-function buildTargetVariants(address: AddressInput): string[] {
+function buildTargetVariants(target: NormalizedAddress): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const fragment of addressVariants(address)) {
-    const normalized = normalizeForMatch(fragment);
+  const add = (fragment?: string) => {
+    const normalized = normalizeForMatch(fragment || '');
     if (normalized.length > 2 && !seen.has(normalized)) {
       seen.add(normalized);
       out.push(normalized);
     }
-  }
+  };
+
+  (target.variants || []).forEach(add);
+  add(target.full_address);
+  add(target.street_address);
+  add(target.street_name);
+  add([target.paon, target.street_name].filter(Boolean).join(' '));
+  add([target.saon, target.paon, target.street_name].filter(Boolean).join(' '));
+  add([target.building_name, target.street_name].filter(Boolean).join(' '));
+  add([target.street_name, target.town].filter(Boolean).join(' '));
   return out;
 }
 
@@ -267,13 +330,17 @@ function extractCandidateVariants(record: CorporateOwnerRecord): Array<{ raw: st
     .filter((entry) => entry.normalized.length > 2);
 }
 
-function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: AddressInput) {
-  const targetVariants = buildTargetVariants(address).map((value) => ({
+function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: AddressInput, normalized: NormalizedAddress) {
+  const targetVariants = buildTargetVariants(normalized).map((value) => ({
     raw: value,
     tokens: new Set(tokens(value)),
   }));
   console.log('Target variants for address in ownerDiscovery:', targetVariants.map((v) => v.raw));
   if (!targetVariants.length) return null;
+
+  // Extract target PAON/SAON (house vs unit)
+  const targetPaon = (normalized.paon || extractPaonFromAddressInput(address) || '').toLowerCase();
+  const targetSaon = (normalized.saon_identifier || normalized.saon || extractSaonFromAddressInput(address) || '').toLowerCase();
 
   type MatchResult = {
     record: CorporateOwnerRecord;
@@ -281,17 +348,59 @@ function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: Addre
     targetSize: number;
     targetVariant: string;
     candidateVariant: string;
+    unitExact?: boolean;
+    paonExact?: boolean;
+    canonicalMatched?: boolean;
+    targetCanonical?: string;
+    candidateCanonical?: string;
   };
 
   let best: MatchResult | null = null;
 
   for (const record of candidates) {
-    const candidateVariants = extractCandidateVariants(record).map((entry) => ({
-      raw: entry.raw,
-      normalized: entry.normalized,
-      tokens: new Set(tokens(entry.normalized)),
-    }));
+    const normalizedCandidate = normalizeCorporateRecordAddress(record);
+    const variantMap = new Map<string, { raw: string; tokens: Set<string> }>();
+
+    for (const entry of extractCandidateVariants(record)) {
+      const normalizedValue = normalizeForMatch(entry.raw);
+      if (!variantMap.has(normalizedValue)) {
+        variantMap.set(normalizedValue, {
+          raw: entry.raw,
+          tokens: new Set(tokens(normalizedValue)),
+        });
+      }
+    }
+
+    if (normalizedCandidate.variants) {
+      for (const variant of normalizedCandidate.variants) {
+        const normalizedValue = normalizeForMatch(variant);
+        if (!variantMap.has(normalizedValue)) {
+          variantMap.set(normalizedValue, {
+            raw: variant,
+            tokens: new Set(tokens(normalizedValue)),
+          });
+        }
+      }
+    }
+
+    const candidateVariants = Array.from(variantMap.values());
     if (!candidateVariants.length) continue;
+
+    const candidateCanonical = normalizedCandidate.canonical_key || undefined;
+    if (candidateCanonical && normalized.canonical_key && candidateCanonical === normalized.canonical_key) {
+      return {
+        record,
+        extraTokens: 0,
+        targetSize: targetVariants[0]?.tokens.size || 0,
+        targetVariant: normalized.canonical_key,
+        candidateVariant: candidateCanonical,
+        unitExact: true,
+        paonExact: true,
+        canonicalMatched: true,
+        targetCanonical: normalized.canonical_key,
+        candidateCanonical,
+      };
+    }
 
     for (const candidate of candidateVariants) {
       if (!candidate.tokens.size) continue;
@@ -299,15 +408,25 @@ function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: Addre
         if (!target.tokens.size) continue;
         let missing = 0;
         for (const token of target.tokens) {
-          if (!candidate.tokens.has(token)) {
-            missing = 1;
-            break;
-          }
+          if (!candidate.tokens.has(token)) { missing = 1; break; }
         }
         if (missing) continue;
+
+        const candRawForParse = candidate.raw;
+        const candPaon = extractPaonFromFreeform(candRawForParse);
+        const candSaon = extractSaonFromFreeform(candRawForParse);
+
+        if (targetPaon && candPaon && targetPaon !== candPaon) continue;
+        if (targetSaon && candSaon && targetSaon !== candSaon) continue;
+
         const extraTokens = candidate.tokens.size - target.tokens.size;
+        const unitExact = Boolean(targetSaon && candSaon && targetSaon === candSaon);
+        const paonExact = Boolean(targetPaon && candPaon && targetPaon === candPaon);
+
         if (
           !best ||
+          (unitExact && !best.unitExact) ||
+          (paonExact && !best.paonExact) ||
           extraTokens < best.extraTokens ||
           (extraTokens === best.extraTokens && target.tokens.size > best.targetSize)
         ) {
@@ -317,6 +436,11 @@ function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: Addre
             targetSize: target.tokens.size,
             targetVariant: target.raw,
             candidateVariant: candidate.raw,
+            unitExact,
+            paonExact,
+            canonicalMatched: false,
+            targetCanonical: normalized.canonical_key || undefined,
+            candidateCanonical: candidateCanonical,
           };
         }
       }
@@ -466,7 +590,18 @@ export default new Worker<OwnerDiscoveryJob>(
       postcode: baseAddr.postcode.trim(),
       country: baseAddr.country?.trim() || baseAddr.country || 'GB',
     };
-    const payload = { ...rawPayload, address };
+    const targetNormalized = normalizeAddressFragments({
+      unit: address.unit,
+      saon: address.unit,
+      buildingName: address.buildingName,
+      lines: [address.line1, address.line2, address.city].filter((value): value is string => typeof value === 'string' && value.trim().length > 0),
+      town: address.city,
+      postcode: address.postcode,
+      countryCode: address.country,
+      fullAddress: prettyAddress(address),
+      source: 'owner_input',
+    });
+    const payload = { ...rawPayload, address, normalizedAddress: targetNormalized };
     await startJob({ jobId, queue: 'owner-discovery', name: job.name, payload });
     const pretty = prettyAddress(address);
 
@@ -483,6 +618,14 @@ export default new Worker<OwnerDiscoveryJob>(
         postcode: baseAddr.postcode.trim(),
         country: baseAddr.country?.trim() || baseAddr.country || 'GB',
         addressKey: addressKey(address),
+        normalized: {
+          canonical: targetNormalized.canonical_key,
+          saon: targetNormalized.saon || null,
+          paon: targetNormalized.paon || null,
+          street: targetNormalized.street_name || targetNormalized.street_address || null,
+          town: targetNormalized.town || null,
+          postcode: targetNormalized.postcode || null,
+        },
         propertyId,
       });
       if (rootJobId) {
@@ -495,7 +638,7 @@ export default new Worker<OwnerDiscoveryJob>(
       console.log('Corporate postcode hits in ownerDiscovery:', postcodeHits.length, postcodeHits.slice(0, 5).map((h) => h.ownerName));
 
       if (postcodeHits.length) {
-        const best = chooseCorporateMatch(postcodeHits, address);
+        const best = chooseCorporateMatch(postcodeHits, address, targetNormalized);
         await logEvent(jobId, 'info', 'Corporate postcode search', {
           postcode: address.postcode,
           hitCount: postcodeHits.length,
@@ -517,6 +660,11 @@ export default new Worker<OwnerDiscoveryJob>(
                 targetVariant: best.targetVariant,
                 candidateVariant: best.candidateVariant,
                 extraTokens: best.extraTokens,
+                targetCanonical: targetNormalized.canonical_key,
+                targetPaon: targetNormalized.paon || null,
+                targetSaon: targetNormalized.saon || null,
+                candidateCanonical: best.candidateCanonical || null,
+                canonicalMatched: best.canonicalMatched ?? false,
               }
             : null,
         });
@@ -591,13 +739,14 @@ export default new Worker<OwnerDiscoveryJob>(
       let latestSaleDate: string | undefined;
       if (address.postcode) {
         pricePaidTransactions = await fetchPricePaidTransactionsByPostcode(address.postcode);
-        pricePaidMatch = choosePricePaidTransaction(address, pricePaidTransactions);
+        pricePaidMatch = choosePricePaidTransaction(targetNormalized, pricePaidTransactions);
         if (pricePaidMatch?.transaction?.date) {
           latestSaleDate = pricePaidMatch.transaction.date;
           latestSaleYear = extractSaleYear(pricePaidMatch.transaction.date);
         }
         await logEvent(jobId, 'info', 'Land Registry price paid search', {
           postcode: address.postcode,
+          targetCanonical: targetNormalized.canonical_key,
           transactionCount: pricePaidTransactions.length,
           latestSaleDate: latestSaleDate || null,
           latestSaleYear: latestSaleYear ?? null,
@@ -611,6 +760,7 @@ export default new Worker<OwnerDiscoveryJob>(
                 score: pricePaidMatch.score,
                 targetVariant: pricePaidMatch.targetVariant,
                 candidateVariant: pricePaidMatch.candidateVariant,
+                canonical: pricePaidMatch.transaction.normalized?.canonical_key || null,
               }
             : null,
           sampleTransactions: pricePaidTransactions.slice(0, 5).map((tx) => ({
@@ -619,6 +769,7 @@ export default new Worker<OwnerDiscoveryJob>(
             paon: tx.paon ?? null,
             saon: tx.saon ?? null,
             street: tx.street ?? null,
+            canonical: tx.normalized?.canonical_key || null,
           })),
         });
       } else {

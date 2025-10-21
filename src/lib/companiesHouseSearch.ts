@@ -2,6 +2,7 @@ import { logger } from './logger.js';
 import { AddressInput, normalizePostcode } from './address.js';
 import { chGetJson } from './companiesHouseClient.js';
 import { logEvent } from './progress.js';
+import { normalizeAddressFragments, NormalizedAddress } from './normalizedAddress.js';
 
 const HAS_CH_API_KEY = Boolean((process.env.CH_API_KEY || '').trim());
 
@@ -35,6 +36,62 @@ function normalizeTown(value?: string | null): string {
     .trim();
 }
 
+function normalizedFromTarget(target: AddressInput): NormalizedAddress {
+  const lines = [target.unit, target.buildingName, target.line1, target.line2, target.city].filter(Boolean) as string[];
+  return normalizeAddressFragments({
+    unit: target.unit,
+    saon: target.unit,
+    buildingName: target.buildingName,
+    lines,
+    town: target.city,
+    postcode: target.postcode,
+    countryCode: target.country || 'GB',
+    fullAddress: lines.concat(target.postcode || '').filter(Boolean).join(', '),
+    source: 'target',
+  });
+}
+
+function normalizedFromCandidate(candidate: any): NormalizedAddress {
+  if (!candidate || typeof candidate !== 'object') {
+    return normalizeAddressFragments({
+      lines: [],
+      countryCode: 'GB',
+      source: 'candidate',
+    });
+  }
+
+  const lines = [
+    candidate.saon || candidate.sub_building_name || candidate.po_box || candidate.care_of || '',
+    candidate.building_name || candidate.premises || candidate.organisation_name || '',
+    candidate.address_line_1 || candidate.premises || '',
+    candidate.address_line_2 || candidate.address_line_3 || candidate.street_address || candidate.address_snippet || '',
+    candidate.locality || candidate.town || candidate.post_town || '',
+    candidate.region || candidate.county || '',
+  ]
+    .map((s: string) => (typeof s === 'string' ? s : ''))
+    .filter(Boolean);
+
+  const postcode = candidate.postal_code || candidate.postcode || candidate.post_code;
+  const country =
+    candidate.country ||
+    candidate.country_of_residence ||
+    (candidate.address && typeof candidate.address === 'object' ? candidate.address.country : undefined) ||
+    'GB';
+  const fullAddress = candidate.address_snippet || candidate.snippet || lines.join(', ');
+
+  return normalizeAddressFragments({
+    unit: candidate.saon || candidate.sub_building_name || candidate.po_box || candidate.care_of,
+    saon: candidate.saon || candidate.sub_building_name || candidate.po_box || candidate.care_of,
+    buildingName: candidate.building_name || candidate.premises || candidate.organisation_name,
+    lines,
+    town: candidate.locality || candidate.town || candidate.post_town || candidate.region,
+    postcode,
+    countryCode: country,
+    fullAddress,
+    source: 'companies_house',
+  });
+}
+
 type AddressMatchDetail = {
   confidence: number;
   matched: boolean;
@@ -50,10 +107,22 @@ type AddressMatchDetail = {
   };
   targetTokens: string[];
   candidateTokens: string[];
+  canonical: {
+    target: string;
+    candidate: string;
+    matched: boolean;
+  };
+  normalized: {
+    target: NormalizedAddress;
+    candidate: NormalizedAddress;
+  };
 };
 
 function scoreAddressMatch(target: AddressInput, candidate: any): AddressMatchDetail {
+  const targetNormalized = normalizedFromTarget(target);
+
   if (!candidate) {
+    const candidateNormalized = normalizedFromCandidate(undefined);
     return {
       confidence: 0,
       matched: false,
@@ -61,50 +130,85 @@ function scoreAddressMatch(target: AddressInput, candidate: any): AddressMatchDe
       candidateAddress: {},
       targetTokens: [],
       candidateTokens: [],
+      canonical: {
+        target: targetNormalized.canonical_key,
+        candidate: candidateNormalized.canonical_key,
+        matched: false,
+      },
+      normalized: {
+        target: targetNormalized,
+        candidate: candidateNormalized,
+      },
     };
   }
 
+  const candidateNormalized = normalizedFromCandidate(candidate);
+
   const candidateAddress = {
-    unit: candidate.saon || candidate.sub_building_name || candidate.po_box || candidate.care_of || '',
-    buildingName: candidate.building_name || candidate.premises || candidate.organisation_name || '',
+    unit: candidateNormalized.saon || candidateNormalized.saon_identifier || '',
+    buildingName: candidateNormalized.building_name || '',
     line1: candidate.address_line_1 || candidate.premises || candidate.care_of || '',
     line2: candidate.address_line_2 || candidate.address_line_3 || candidate.street_address || candidate.address_snippet || '',
     locality: candidate.locality || candidate.town || candidate.post_town || '',
     region: candidate.region || candidate.county || '',
-    postcode: candidate.postal_code || candidate.postcode || candidate.post_code || '',
+    postcode: candidateNormalized.postcode || candidate.postal_code || candidate.postcode || candidate.post_code || '',
   };
 
-  const targetTokens = Array.from(
-    buildTokenSet(target.unit, target.buildingName, target.line1, target.line2, target.city)
+  const targetTokenSet = buildTokenSet(target.unit, target.buildingName, target.line1, target.line2, target.city);
+  targetNormalized.variants.forEach((variant) => tokenize(variant).forEach((token) => targetTokenSet.add(token)));
+  if (targetNormalized.street_address) tokenize(targetNormalized.street_address).forEach((token) => targetTokenSet.add(token));
+  if (targetNormalized.street_name) tokenize(targetNormalized.street_name).forEach((token) => targetTokenSet.add(token));
+
+  const candidateTokenSet = buildTokenSet(
+    candidateNormalized.saon,
+    candidateNormalized.building_name,
+    candidateNormalized.street_address,
+    candidateNormalized.street_name,
+    candidateNormalized.town,
+    candidateNormalized.postcode,
+    candidate.address_snippet,
+    candidate.snippet,
+    candidate.premises
   );
-  const candidateTokens = Array.from(
-    buildTokenSet(
-      candidateAddress.unit,
-      candidateAddress.buildingName,
-      candidateAddress.line1,
-      candidateAddress.line2,
-      candidateAddress.locality,
-      candidateAddress.region,
-      candidate.address_snippet,
-      candidate.snippet,
-      candidate.premises
-    )
-  );
+  candidateNormalized.variants.forEach((variant) => tokenize(variant).forEach((token) => candidateTokenSet.add(token)));
+
+  const targetTokens = Array.from(targetTokenSet);
+  const candidateTokens = Array.from(candidateTokenSet);
 
   const reasons: string[] = [];
   let confidence = 0;
 
-  const targetPostcode = normalizePostcode(target.postcode);
-  const candidatePostcode = normalizePostcode(candidateAddress.postcode);
+  const targetPostcode = normalizePostcode(targetNormalized.postcode || target.postcode);
+  const candidatePostcode = normalizePostcode(candidateNormalized.postcode || candidateAddress.postcode);
+
+  const canonicalMatch =
+    Boolean(targetNormalized.canonical_key) &&
+    Boolean(candidateNormalized.canonical_key) &&
+    targetNormalized.canonical_key === candidateNormalized.canonical_key;
+
+  if (canonicalMatch) {
+    confidence = Math.max(confidence, 0.95);
+    reasons.push('canonical_match');
+  }
+
   if (targetPostcode) {
     if (!candidatePostcode || candidatePostcode !== targetPostcode) {
       return {
         confidence: 0,
         matched: false,
-        reasons: [],
+        reasons: canonicalMatch ? ['canonical_match', 'postcode_mismatch'] : [],
         candidateAddress,
         targetTokens,
         candidateTokens,
+        canonical: {
+          target: targetNormalized.canonical_key,
+          candidate: candidateNormalized.canonical_key,
+          matched: canonicalMatch,
+        },
+        normalized: {
+          target: targetNormalized,
+          candidate: candidateNormalized,
+        },
       };
     }
     confidence += 0.35;
@@ -119,7 +223,7 @@ function scoreAddressMatch(target: AddressInput, candidate: any): AddressMatchDe
   } else if (tokenCoverage >= 0.5 && tokenIntersection.length >= 2) {
     confidence += 0.25;
     reasons.push('partial_address_token_match');
-  } else if (targetTokens.length) {
+  } else if (targetTokens.length && !canonicalMatch) {
     return {
       confidence,
       matched: false,
@@ -127,13 +231,22 @@ function scoreAddressMatch(target: AddressInput, candidate: any): AddressMatchDe
       candidateAddress,
       targetTokens,
       candidateTokens,
+      canonical: {
+        target: targetNormalized.canonical_key,
+        candidate: candidateNormalized.canonical_key,
+        matched: canonicalMatch,
+      },
+      normalized: {
+        target: targetNormalized,
+        candidate: candidateNormalized,
+      },
     };
   }
 
   const numericTokens = targetTokens.filter((token) => /\d/.test(token));
   if (numericTokens.length) {
     const allNumericPresent = numericTokens.every((token) => candidateTokens.includes(token));
-    if (!allNumericPresent) {
+    if (!allNumericPresent && !canonicalMatch) {
       return {
         confidence,
         matched: false,
@@ -141,10 +254,21 @@ function scoreAddressMatch(target: AddressInput, candidate: any): AddressMatchDe
         candidateAddress,
         targetTokens,
         candidateTokens,
+        canonical: {
+          target: targetNormalized.canonical_key,
+          candidate: candidateNormalized.canonical_key,
+          matched: canonicalMatch,
+        },
+        normalized: {
+          target: targetNormalized,
+          candidate: candidateNormalized,
+        },
       };
     }
-    confidence += 0.1;
-    reasons.push('number_match');
+    if (allNumericPresent) {
+      confidence += 0.1;
+      reasons.push('number_match');
+    }
   }
 
   if (candidateTokens.length) {
@@ -155,15 +279,17 @@ function scoreAddressMatch(target: AddressInput, candidate: any): AddressMatchDe
     }
   }
 
-  const targetTown = normalizeTown(target.city);
-  const candidateTown = normalizeTown(candidateAddress.locality || candidateAddress.region);
+  const targetTown = normalizeTown(targetNormalized.town || target.city);
+  const candidateTown = normalizeTown(candidateNormalized.town || candidateAddress.locality || candidateAddress.region);
   if (targetTown && candidateTown && targetTown === candidateTown) {
     confidence += 0.1;
     reasons.push('town_match');
   }
 
   confidence = Math.min(confidence, 1);
-  const matched = confidence >= 0.6 && tokenIntersection.length >= 2;
+  const matched =
+    canonicalMatch ||
+    (confidence >= 0.6 && tokenIntersection.length >= 2 && (!numericTokens.length || reasons.includes('number_match')));
 
   return {
     confidence,
@@ -172,6 +298,15 @@ function scoreAddressMatch(target: AddressInput, candidate: any): AddressMatchDe
     candidateAddress,
     targetTokens,
     candidateTokens,
+    canonical: {
+      target: targetNormalized.canonical_key,
+      candidate: candidateNormalized.canonical_key,
+      matched: canonicalMatch,
+    },
+    normalized: {
+      target: targetNormalized,
+      candidate: candidateNormalized,
+    },
   };
 }
 
@@ -191,6 +326,15 @@ export type CompanyAddressHit = {
     region?: string;
     postcode?: string;
   };
+  canonical?: {
+    target: string;
+    candidate: string;
+    matched: boolean;
+  };
+  normalized?: {
+    target: NormalizedAddress;
+    candidate: NormalizedAddress;
+  };
   raw: any;
 };
 
@@ -205,6 +349,15 @@ export type OfficerAddressHit = {
   matchConfidence: number;
   matchReasons: string[];
   matched: boolean;
+  canonical?: {
+    target: string;
+    candidate: string;
+    matched: boolean;
+  };
+  normalized?: {
+    target: NormalizedAddress;
+    candidate: NormalizedAddress;
+  };
   raw: any;
   officerRaw?: any;
   linksSelf?: string;
@@ -242,6 +395,8 @@ export async function searchCompaniesByAddress(jobId: string, address: AddressIn
           matchReasons: score.reasons,
           matched: score.matched,
           candidateAddress: score.candidateAddress,
+          canonical: score.canonical,
+          normalized: score.normalized,
           raw: item,
         };
       })
@@ -283,6 +438,7 @@ function extractOfficerNameParts(off: any): { firstName?: string; middleName?: s
 
 function isDeterministicAddressMatch(detail: ReturnType<typeof scoreAddressMatch>): boolean {
   // Require postcode and number match, plus decent token coverage
+  if (detail.canonical?.matched) return true;
   const hasPostcode = detail.reasons.includes('postcode_match');
   const hasNumber = detail.reasons.includes('number_match');
   const hasTokens = detail.reasons.includes('address_token_match') || detail.confidence >= 0.8;
@@ -323,6 +479,8 @@ export async function searchOfficersByAddress(jobId: string, address: AddressInp
         matchConfidence: score.confidence,
         matchReasons: score.reasons,
         matched: score.matched,
+        canonical: score.canonical,
+        normalized: score.normalized,
         raw: item,
         linksSelf,
         officerApiPath,

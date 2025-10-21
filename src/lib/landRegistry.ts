@@ -5,6 +5,7 @@ import { logger } from './logger.js';
 import { AddressInput, addressKey, prettyAddress, normalizePostcode } from './address.js';
 import { pool, query } from './db.js';
 import { logEvent } from '../lib/progress.js';
+import { normalizeFreeformAddress, normalizeAddressFragments, NormalizedAddress } from './normalizedAddress.js';
 
 export type CorporateOwnerRecord = {
   ownerName: string;
@@ -12,6 +13,7 @@ export type CorporateOwnerRecord = {
   addressKey: string;
   raw?: any;
   datasetLabel?: string;
+  normalized?: NormalizedAddress;
 };
 
 export type CorporateOwnerMatch = {
@@ -33,6 +35,7 @@ export type PricePaidTransaction = {
   date?: string;
   category?: string;
   raw?: any;
+  normalized?: NormalizedAddress;
 };
 
 type DatasetConfig = {
@@ -78,6 +81,51 @@ function formatPostcodeForQuery(postcode: string): string | null {
   const outward = normalized.slice(0, normalized.length - 3);
   const inward = normalized.slice(-3);
   return `${outward} ${inward}`;
+}
+
+export function normalizeCorporateRecordAddress(record: CorporateOwnerRecord): NormalizedAddress {
+  if (record.normalized) return record.normalized;
+  const raw = record.raw || {};
+  const propertyAddress = String(raw.property_address || raw.propertyAddress || '').trim();
+  const addressLines = Array.isArray(raw.address_lines) ? raw.address_lines : [];
+  const saon = raw.saon || raw.secondary_addressable_object_name || raw.secondary_addressable_object || undefined;
+  const buildingName = raw.building_name || raw.premises || raw.property_name || undefined;
+  const paon = raw.paon || raw.primary_addressable_object_name || raw.primary_addressable_object || undefined;
+  const street = raw.street || raw.thoroughfare || undefined;
+  const town = raw.town || raw.post_town || raw.locality || undefined;
+  const county = raw.county || raw.district || undefined;
+  const postcodeFromRaw = raw.postcode || raw.post_code || raw.post_code_in || undefined;
+
+  const keyParts = (record.addressKey || '').split('|').filter(Boolean);
+  const keyPostcode = keyParts.length ? keyParts[keyParts.length - 1] : undefined;
+  const postcode = normalizePostcode(postcodeFromRaw || keyPostcode || '') || undefined;
+
+  const lines: string[] = [];
+  if (saon) lines.push(String(saon));
+  if (buildingName) lines.push(String(buildingName));
+  if (paon || street) lines.push([paon, street].filter(Boolean).join(' ').trim());
+  if (addressLines.length) lines.push(...addressLines.map((line: any) => (typeof line === 'string' ? line : '')).filter(Boolean));
+  if (propertyAddress) lines.push(propertyAddress);
+  if (town) lines.push(String(town));
+  if (county) lines.push(String(county));
+
+  const normalized = normalizeAddressFragments({
+    saon: saon ? String(saon) : undefined,
+    buildingName: buildingName ? String(buildingName) : undefined,
+    paon: paon ? String(paon) : undefined,
+    streetName: street ? String(street) : undefined,
+    streetAddress: [paon, street].filter(Boolean).join(' '),
+    town: town ? String(town) : undefined,
+    postcode,
+    countryCode: 'GB',
+    lines,
+    fullAddress: propertyAddress || lines.filter(Boolean).join(', '),
+    additionalDetail: raw.additional_detail || raw.description || undefined,
+    source: record.datasetLabel ? `corporate_${record.datasetLabel}` : 'corporate_land_registry',
+  });
+
+  record.normalized = normalized;
+  return normalized;
 }
 
 export async function fetchPricePaidTransactionsByPostcode(
@@ -160,17 +208,34 @@ ORDER BY DESC(?date)
     return bindings.map((binding: any) => {
       const amount = toNumber(literal(binding, 'amount'));
       const transactionDate = literal(binding, 'date');
+      const paon = literal(binding, 'paon');
+      const saon = literal(binding, 'saon');
+      const street = literal(binding, 'street');
+      const town = literal(binding, 'town');
+      const postcode = literal(binding, 'postcode') || formattedPostcode;
+      const normalized = normalizeAddressFragments({
+        saon: saon || undefined,
+        paon: paon || undefined,
+        streetName: street || undefined,
+        streetAddress: [paon, street].filter(Boolean).join(' '),
+        town: town || undefined,
+        postcode: postcode || undefined,
+        countryCode: 'GB',
+        fullAddress: [saon, paon, street, town, postcode].filter(Boolean).join(', '),
+        source: 'land_registry_price_paid',
+      });
       return {
-        paon: literal(binding, 'paon'),
-        saon: literal(binding, 'saon'),
-        street: literal(binding, 'street'),
-        town: literal(binding, 'town'),
+        paon,
+        saon,
+        street,
+        town,
         county: literal(binding, 'county'),
-        postcode: literal(binding, 'postcode') || formattedPostcode,
+        postcode,
         amount,
         date: transactionDate,
         category: literal(binding, 'category'),
         raw: binding,
+        normalized,
       };
     });
   } catch (err) {
@@ -325,13 +390,15 @@ function entryToRecord(entry: any, defaultLabel: string): CorporateOwnerRecord |
   });
   if (!key) return null;
 
-  return {
+  const record: CorporateOwnerRecord = {
     ownerName,
     companyNumber: ensureString(readField(entry, ['companyNumber', 'company_number', 'crn', 'companyregistrationno', 'company_registration_number'])) || undefined,
     addressKey: key,
     raw: entry,
     datasetLabel: ensureString(readField(entry, ['datasetLabel', 'dataset', 'source'])) || defaultLabel,
   };
+  record.normalized = normalizeCorporateRecordAddress(record);
+  return record;
 }
 
 function parseDatasetJson(json: any): any[] {
@@ -468,13 +535,15 @@ async function loadDatasetFromDb(): Promise<Map<string, CorporateOwnerRecord>> {
   const map = new Map<string, CorporateOwnerRecord>();
   for (const row of rows) {
     if (!map.has(row.address_key)) {
-      map.set(row.address_key, {
+      const record: CorporateOwnerRecord = {
         ownerName: row.owner_name,
         companyNumber: row.company_number || undefined,
         addressKey: row.address_key,
         datasetLabel: row.dataset_label || 'uk',
         raw: row.raw,
-      });
+      };
+      record.normalized = normalizeCorporateRecordAddress(record);
+      map.set(row.address_key, record);
     }
   }
   if (map.size) {
