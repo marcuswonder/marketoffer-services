@@ -16,6 +16,7 @@ import {
   summarizeOfficer,
   listCompanyDirectors,
   listCompanyPscs,
+  fetchOfficerAppointments,
   type CompanyAddressHit,
   type CompanyOfficerRecord,
   type CompanyPscRecord,
@@ -181,8 +182,21 @@ function pricePaidCandidateVariants(tx: PricePaidTransaction): Array<{ raw: stri
 function choosePricePaidTransaction(
   normalized: NormalizedAddress,
   transactions: PricePaidTransaction[]
-): { transaction: PricePaidTransaction; score: number; sharedTokens: number; targetVariant: string; candidateVariant: string } | null {
+): {
+  transaction: PricePaidTransaction;
+  score: number;
+  sharedTokens: number;
+  targetVariant: string;
+  candidateVariant: string;
+  unitExact?: boolean;
+  paonExact?: boolean;
+  reason?: string;
+} | null {
   if (!transactions.length) return null;
+
+  const targetPaon = (normalized.paon || '').toString().toLowerCase();
+  const targetSaon = (normalized.saon_identifier || normalized.saon || '').toString().toLowerCase();
+
   const targetVariants = buildTargetVariants(normalized).map((value) => ({
     raw: value,
     tokens: new Set(tokens(value)),
@@ -197,6 +211,9 @@ function choosePricePaidTransaction(
     targetVariant: string;
     candidateVariant: string;
     timestamp: number;
+    unitExact?: boolean;
+    paonExact?: boolean;
+    reason?: string;
   };
 
   const parseTimestamp = (value?: string): number => {
@@ -215,64 +232,102 @@ function choosePricePaidTransaction(
 
   let best: MatchResult | null = null;
 
-  for (const transaction of transactions) {
-    const variants = pricePaidCandidateVariants(transaction);
+  // Helper to evaluate a single candidate variant against a target variant with strict PAON/SAON logic
+  const consider = (
+    tx: PricePaidTransaction,
+    candidateRaw: string,
+    candidateTokens: Set<string>,
+    t: { raw: string; tokens: Set<string>; numericTokens: string[] },
+    timestamp: number
+  ) => {
+    // Hard requirements when input has a unit (SAON)
+    if (targetSaon) {
+      const candSaon = (tx.saon || '').toString().toLowerCase();
+      if (!candSaon || candSaon !== targetSaon) {
+        return; // reject if target has SAON but candidate does not match exactly
+      }
+    }
+
+    // Hard requirements for PAON when present on target
+    if (targetPaon) {
+      const candPaon = (tx.paon || '').toString().toLowerCase();
+      if (!candPaon || candPaon !== targetPaon) {
+        return; // reject if target has PAON but candidate does not match exactly
+      }
+    }
+
+    // Token subset scoring as a tie-breaker only (after strict checks above)
+    let shared = 0;
+    for (const token of t.tokens) {
+      if (candidateTokens.has(token)) shared += 1;
+    }
+    if (!shared) return;
+
+    // Preserve the old numeric token discipline for cases with no PAON/SAON in the prompt
+    if (!targetPaon && !targetSaon && t.numericTokens.length) {
+      let numericMatch = true;
+      for (const token of t.numericTokens) {
+        if (!candidateTokens.has(token)) {
+          numericMatch = false;
+          break;
+        }
+      }
+      if (!numericMatch) return;
+    }
+
+    const missing = t.tokens.size - shared;
+    const extra = candidateTokens.size - shared;
+    const score = shared * 10 - missing * 5 - extra;
+
+    const res: MatchResult = {
+      transaction: tx,
+      score,
+      sharedTokens: shared,
+      targetVariant: t.raw,
+      candidateVariant: candidateRaw,
+      timestamp,
+      unitExact: Boolean(targetSaon),
+      paonExact: Boolean(targetPaon),
+      reason: targetSaon || targetPaon ? 'strict_unit_paon_match' : 'token_subset',
+    };
+
+    if (
+      !best ||
+      res.score > best.score ||
+      (res.score === best.score && timestamp > best.timestamp)
+    ) {
+      best = res;
+    }
+  };
+
+  for (const tx of transactions) {
+    const variants = pricePaidCandidateVariants(tx);
     if (!variants.length) continue;
-    const timestamp = parseTimestamp(transaction.date);
+    const timestamp = parseTimestamp(tx.date);
 
-    for (const candidate of variants) {
-      if (!candidate.tokens.size) continue;
-      for (const target of targetVariants) {
-        if (!target.tokens.size) continue;
-        let shared = 0;
-        for (const token of target.tokens) {
-          if (candidate.tokens.has(token)) shared += 1;
-        }
-        if (!shared) continue;
-
-        const numericTokens = target.numericTokens;
-        if (numericTokens.length) {
-          let numericMatch = true;
-          for (const token of numericTokens) {
-            if (!candidate.tokens.has(token)) {
-              numericMatch = false;
-              break;
-            }
-          }
-          if (!numericMatch) continue;
-        }
-
-        const missing = target.tokens.size - shared;
-        const extra = candidate.tokens.size - shared;
-        const score = shared * 10 - missing * 5 - extra;
-
-        if (
-          !best ||
-          score > best.score ||
-          (score === best.score && timestamp > best.timestamp)
-        ) {
-          best = {
-            transaction,
-            score,
-            sharedTokens: shared,
-            targetVariant: target.raw,
-            candidateVariant: candidate.raw,
-            timestamp,
-          };
-        }
+    for (const cand of variants) {
+      if (!cand.tokens.size) continue;
+      for (const t of targetVariants) {
+        if (!t.tokens.size) continue;
+        consider(tx, cand.raw, cand.tokens, t, timestamp);
       }
     }
   }
 
-  return best
-    ? {
-        transaction: best.transaction,
-        score: best.score,
-        sharedTokens: best.sharedTokens,
-        targetVariant: best.targetVariant,
-        candidateVariant: best.candidateVariant,
-      }
-    : null;
+  if (!best) {
+    return null;
+  }
+  const finalized = best as MatchResult;
+  return {
+    transaction: finalized.transaction,
+    score: finalized.score,
+    sharedTokens: finalized.sharedTokens,
+    targetVariant: finalized.targetVariant,
+    candidateVariant: finalized.candidateVariant,
+    unitExact: finalized.unitExact,
+    paonExact: finalized.paonExact,
+    reason: finalized.reason,
+  };
 }
 
 function extractSaleYear(dateStr?: string): number | undefined {
@@ -330,7 +385,11 @@ function extractCandidateVariants(record: CorporateOwnerRecord): Array<{ raw: st
     .filter((entry) => entry.normalized.length > 2);
 }
 
-function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: AddressInput, normalized: NormalizedAddress) {
+function chooseCorporateMatch(
+  candidates: CorporateOwnerRecord[],
+  address: AddressInput,
+  normalized: NormalizedAddress
+) {
   const targetVariants = buildTargetVariants(normalized).map((value) => ({
     raw: value,
     tokens: new Set(tokens(value)),
@@ -353,14 +412,20 @@ function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: Addre
     canonicalMatched?: boolean;
     targetCanonical?: string;
     candidateCanonical?: string;
+    // diagnostics
+    resolvedCandidateSaon?: string | null;
+    resolvedCandidatePaon?: string | null;
+    candidateSaonSet?: string[];
+    reason?: string;
   };
 
   let best: MatchResult | null = null;
 
   for (const record of candidates) {
     const normalizedCandidate = normalizeCorporateRecordAddress(record);
-    const variantMap = new Map<string, { raw: string; tokens: Set<string> }>();
 
+    // Collect candidate variants (deduped)
+    const variantMap = new Map<string, { raw: string; tokens: Set<string> }>();
     for (const entry of extractCandidateVariants(record)) {
       const normalizedValue = normalizeForMatch(entry.raw);
       if (!variantMap.has(normalizedValue)) {
@@ -370,7 +435,6 @@ function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: Addre
         });
       }
     }
-
     if (normalizedCandidate.variants) {
       for (const variant of normalizedCandidate.variants) {
         const normalizedValue = normalizeForMatch(variant);
@@ -382,46 +446,75 @@ function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: Addre
         }
       }
     }
-
     const candidateVariants = Array.from(variantMap.values());
+
+    // Resolve SAON from any source on the candidate (normalized fields or any variant string)
+    const candidateSaonField = (normalizedCandidate.saon_identifier || normalizedCandidate.saon || '').toLowerCase();
+    const candidateSaonSet = new Set<string>();
+    if (candidateSaonField) candidateSaonSet.add(candidateSaonField);
+    for (const v of candidateVariants) {
+      const vSaon = extractSaonFromFreeform(v.raw);
+      if (vSaon) candidateSaonSet.add(vSaon.toLowerCase());
+    }
+
     if (!candidateVariants.length) continue;
 
+    // Canonical-key perfect match remains a hard accept
     const candidateCanonical = normalizedCandidate.canonical_key || undefined;
     if (candidateCanonical && normalized.canonical_key && candidateCanonical === normalized.canonical_key) {
       return {
         record,
         extraTokens: 0,
         targetSize: targetVariants[0]?.tokens.size || 0,
-        targetVariant: normalized.canonical_key,
+        targetVariant: normalized.canonical_key!,
         candidateVariant: candidateCanonical,
         unitExact: true,
         paonExact: true,
         canonicalMatched: true,
-        targetCanonical: normalized.canonical_key,
+        targetCanonical: normalized.canonical_key!,
         candidateCanonical,
+        resolvedCandidateSaon: targetSaon || null,
+        resolvedCandidatePaon: targetPaon || null,
+        candidateSaonSet: Array.from(candidateSaonSet),
+        reason: 'canonical_key_equal',
       };
+    }
+
+    // If the target has an SAON, be strict:
+    //  - If ANY SAON can be resolved for the candidate and it != target, skip this record entirely.
+    if (targetSaon && candidateSaonSet.size > 0 && !candidateSaonSet.has(targetSaon)) {
+      continue;
     }
 
     for (const candidate of candidateVariants) {
       if (!candidate.tokens.size) continue;
+
       for (const target of targetVariants) {
         if (!target.tokens.size) continue;
+
+        // Require target tokens subset of candidate tokens
         let missing = 0;
         for (const token of target.tokens) {
           if (!candidate.tokens.has(token)) { missing = 1; break; }
         }
         if (missing) continue;
 
-        const candRawForParse = candidate.raw;
-        const candPaon = extractPaonFromFreeform(candRawForParse);
-        const candSaon = extractSaonFromFreeform(candRawForParse);
+        // Resolve PAON/SAON from the current candidate variant
+        const candPaon = extractPaonFromFreeform(candidate.raw);
+        const candSaon = (extractSaonFromFreeform(candidate.raw) || candidateSaonField || '').toLowerCase();
 
+        // PAON must agree if both sides have one
         if (targetPaon && candPaon && targetPaon !== candPaon) continue;
-        if (targetSaon && candSaon && targetSaon !== candSaon) continue;
 
-        const extraTokens = candidate.tokens.size - target.tokens.size;
+        // If the target has an SAON, then REQUIRE unitExact (the variant must carry the same SAON)
         const unitExact = Boolean(targetSaon && candSaon && targetSaon === candSaon);
+        if (targetSaon && !unitExact) {
+          // do not allow a match via a candidate variant that omits SAON when target has SAON
+          continue;
+        }
+
         const paonExact = Boolean(targetPaon && candPaon && targetPaon === candPaon);
+        const extraTokens = candidate.tokens.size - target.tokens.size;
 
         if (
           !best ||
@@ -441,6 +534,10 @@ function chooseCorporateMatch(candidates: CorporateOwnerRecord[], address: Addre
             canonicalMatched: false,
             targetCanonical: normalized.canonical_key || undefined,
             candidateCanonical: candidateCanonical,
+            resolvedCandidateSaon: candSaon || null,
+            resolvedCandidatePaon: candPaon || null,
+            candidateSaonSet: Array.from(candidateSaonSet),
+            reason: unitExact ? 'unit_exact' : (paonExact ? 'paon_exact' : 'token_subset'),
           };
         }
       }
@@ -493,6 +590,33 @@ function addOrMergeOccupant(
   return { added: false, merged: true, key };
 }
 
+// Helper to split SAON/PAON from address_line_1 or premises (local copy)
+function splitSaonPaonLine(line1?: string, premises?: string): { unit?: string; line1?: string } {
+  const s1 = String(line1 || '').trim();
+  const pre = String(premises || '').trim();
+  const SAON = /(flat|apartment|apt|suite|unit|room|block|floor|fl|lvl|level)\s*(\d+[a-z]?)/i;
+  const numToken = /\b\d+[a-z]?\b/i;
+  if (pre && SAON.test(pre)) {
+    return { unit: pre, line1: s1 || undefined };
+  }
+  if (!s1) return { unit: pre || undefined, line1: undefined };
+  const m = s1.match(SAON);
+  if (m) {
+    let after = s1.slice(m.index! + m[0].length).trim();
+    // Handle optional comma right after SAON, e.g., "Flat 2, 9 Waterfront Mews"
+    if (after.startsWith(',')) {
+      after = after.slice(1).trim();
+    }
+    const n = after.match(numToken);
+    if (n) {
+      const paonAndRest = after.slice(n.index!).trim();
+      return { unit: m[0], line1: paonAndRest };
+    }
+  }
+  if (numToken.test(s1)) return { unit: pre || undefined, line1: s1 };
+  return { unit: pre || undefined, line1: s1 };
+}
+
 function addressInputFromChAddress(addr: any): AddressInput | null {
   if (!addr) return null;
   const pick = (...candidates: Array<any>): string | undefined => {
@@ -504,10 +628,13 @@ function addressInputFromChAddress(addr: any): AddressInput | null {
     }
     return undefined;
   };
-  const unit = pick(addr.saon, addr.sub_building_name, addr.sub_building, addr.po_box, addr.care_of);
+  const split = splitSaonPaonLine(addr.address_line_1 || addr.premises, addr.premises);
+  const unit = pick(addr.saon, addr.sub_building_name, addr.sub_building, addr.po_box, addr.care_of, split.unit);
   const buildingName = pick(addr.building_name, addr.organisation_name, addr.property_name, addr.care_of);
-  const line1Parts = [addr.premises, addr.address_line_1].filter(Boolean);
-  let line1 = line1Parts.length ? line1Parts.map((part: any) => String(part).trim()).filter(Boolean).join(' ') : pick(addr.address_line_1, addr.premises, addr.street_address);
+  const line1Parts = [split.line1 || addr.premises, split.line1 ? undefined : addr.address_line_1].filter(Boolean);
+  let line1 = line1Parts.length
+    ? line1Parts.map((part: any) => String(part).trim()).filter(Boolean).join(' ')
+    : pick(split.line1, addr.address_line_1, addr.premises, addr.street_address);
   let line2 = pick(addr.address_line_2, addr.street_address, addr.address_line_3, addr.thoroughfare);
   const city = pick(addr.locality, addr.town, addr.post_town, addr.region);
   const postcode = pick(addr.postal_code, addr.postcode, addr.post_code);
@@ -665,12 +792,16 @@ export default new Worker<OwnerDiscoveryJob>(
                 targetSaon: targetNormalized.saon || null,
                 candidateCanonical: best.candidateCanonical || null,
                 canonicalMatched: best.canonicalMatched ?? false,
+                candidateResolvedSaon: best.resolvedCandidateSaon || null,
+                candidateResolvedPaon: best.resolvedCandidatePaon || null,
+                candidateSaonSet: best.candidateSaonSet || null,
+                reason: best.reason || null,
               }
             : null,
         });
         if (best) {
           corporate = {
-            matchType: best.extraTokens === 0 ? 'exact' : 'postcode',
+            matchType: (best.unitExact || !targetNormalized.saon) && best.extraTokens === 0 ? 'exact' : 'postcode',
             ownerName: best.record.ownerName,
             companyNumber: best.record.companyNumber,
             source: best.record.datasetLabel || 'land_registry_dataset',
@@ -761,6 +892,9 @@ export default new Worker<OwnerDiscoveryJob>(
                 targetVariant: pricePaidMatch.targetVariant,
                 candidateVariant: pricePaidMatch.candidateVariant,
                 canonical: pricePaidMatch.transaction.normalized?.canonical_key || null,
+                unitExact: pricePaidMatch.unitExact ?? null,
+                paonExact: pricePaidMatch.paonExact ?? null,
+                reason: pricePaidMatch.reason || null,
               }
             : null,
           sampleTransactions: pricePaidTransactions.slice(0, 5).map((tx) => ({
@@ -866,7 +1000,27 @@ export default new Worker<OwnerDiscoveryJob>(
 
           for (const officer of directors) {
             const personalMatches = chPersonalAddressMatchesPrompt(officer.address, address);
-            if (personalMatches) {
+            let matchesAtAddress = personalMatches;
+            let matchedAppointmentAddress: any = undefined;
+            if (!matchesAtAddress && officer.officerId) {
+              try {
+                const appts = await fetchOfficerAppointments(officer.officerId);
+                const items = Array.isArray(appts?.items) ? appts.items : [];
+                for (const it of items) {
+                  if (it?.address && chPersonalAddressMatchesPrompt(it.address, address)) {
+                    matchesAtAddress = true;
+                    matchedAppointmentAddress = it.address;
+                    break;
+                  }
+                }
+              } catch (e) {
+                await logEvent(jobId, 'debug', 'Officer appointment lookup failed during address confirmation', {
+                  officerId: officer.officerId,
+                  error: String(e),
+                });
+              }
+            }
+            if (matchesAtAddress) {
               const occ = occupantFromCompanyPerson(officer.name, {
                 source: 'director',
                 company,
@@ -881,7 +1035,7 @@ export default new Worker<OwnerDiscoveryJob>(
               directorsHeldNotAtAddress.push({
                 name: officer.name,
                 appointedOn: officer.appointedOn || null,
-                address: officer.address || null,
+                address: officer.address || matchedAppointmentAddress || null,
               });
             }
           }

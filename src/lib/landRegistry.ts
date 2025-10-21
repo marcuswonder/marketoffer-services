@@ -286,24 +286,53 @@ function addressMatchesInput(record: CorporateOwnerRecord, address: AddressInput
   const candidateTokens = addressTokensFromRecord(record);
   if (!candidateTokens.size) return false;
 
+  const candidateNormalized = normalizeCorporateRecordAddress(record);
+  const targetNormalized = normalizeAddressFragments({
+    unit: address.unit,
+    saon: address.unit,
+    buildingName: address.buildingName,
+    lines: [address.line1, address.line2, address.city].filter((value): value is string => typeof value === 'string' && value.trim().length > 0),
+    town: address.city,
+    postcode: address.postcode,
+    countryCode: address.country || 'GB',
+    fullAddress: prettyAddress(address),
+    source: 'owner_input',
+  });
+
+  if (candidateNormalized.canonical_key && targetNormalized.canonical_key) {
+    if (candidateNormalized.canonical_key === targetNormalized.canonical_key) {
+      return true;
+    }
+  }
+
+  const targetSaon = (targetNormalized.saon_identifier || targetNormalized.saon || '').toLowerCase();
+  const candidateSaon = (candidateNormalized.saon_identifier || candidateNormalized.saon || '').toLowerCase();
+  if (targetSaon && candidateSaon && targetSaon !== candidateSaon) {
+    return false;
+  }
+  if (targetSaon && !candidateSaon) {
+    return false;
+  }
+
   const requiredTokenSet = new Set<string>();
-  tokenizeAddress(address.unit).forEach((token) => requiredTokenSet.add(token));
-  tokenizeAddress(address.buildingName).forEach((token) => requiredTokenSet.add(token));
+  tokenizeAddress(targetNormalized.saon).forEach((token) => requiredTokenSet.add(token));
+  tokenizeAddress(targetNormalized.building_name).forEach((token) => requiredTokenSet.add(token));
+  tokenizeAddress(targetNormalized.street_address).forEach((token) => requiredTokenSet.add(token));
+  tokenizeAddress(targetNormalized.street_name).forEach((token) => requiredTokenSet.add(token));
+  tokenizeAddress(targetNormalized.town).forEach((token) => requiredTokenSet.add(token));
   tokenizeAddress(address.line1).forEach((token) => requiredTokenSet.add(token));
   tokenizeAddress(address.line2).forEach((token) => requiredTokenSet.add(token));
-  if (!requiredTokenSet.size) return false;
-  const requiredTokens = Array.from(requiredTokenSet);
+  tokenizeAddress(address.unit).forEach((token) => requiredTokenSet.add(token));
+  tokenizeAddress(address.buildingName).forEach((token) => requiredTokenSet.add(token));
+  const requiredTokens = Array.from(requiredTokenSet).filter(Boolean);
+  if (!requiredTokens.length) return false;
 
   const numericTokens = requiredTokens.filter((token) => /\d/.test(token));
   if (numericTokens.length && !numericTokens.every((token) => candidateTokens.has(token))) {
     return false;
   }
 
-  if (!requiredTokens.every((token) => candidateTokens.has(token))) {
-    return false;
-  }
-
-  return true;
+  return requiredTokens.every((token) => candidateTokens.has(token));
 }
 
 export async function searchCorporateOwnersByPostcode(postcode: string): Promise<CorporateOwnerRecord[]> {

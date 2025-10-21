@@ -37,7 +37,8 @@ function normalizeTown(value?: string | null): string {
 }
 
 function normalizedFromTarget(target: AddressInput): NormalizedAddress {
-  const lines = [target.unit, target.buildingName, target.line1, target.line2, target.city].filter(Boolean) as string[];
+  // Exclude unit from lines (do not treat SAON as part of street lines)
+  const lines = [target.buildingName, target.line1, target.line2, target.city].filter(Boolean) as string[];
   return normalizeAddressFragments({
     unit: target.unit,
     saon: target.unit,
@@ -51,6 +52,36 @@ function normalizedFromTarget(target: AddressInput): NormalizedAddress {
   });
 }
 
+// Helper to split SAON/PAON from address_line_1 or premises
+function splitSaonPaonLine(line1?: string, premises?: string): { unit?: string; line1?: string } {
+  const s1 = String(line1 || '').trim();
+  const pre = String(premises || '').trim();
+  // If premises already looks like an SAON, prefer that
+  const SAON = /(flat|apartment|apt|suite|unit|room|block|floor|fl|lvl|level)\s*(\d+[a-z]?)/i;
+  const numToken = /\b\d+[a-z]?\b/i;
+  if (pre && SAON.test(pre)) {
+    return { unit: pre, line1: s1 || undefined };
+  }
+  if (!s1) return { unit: pre || undefined, line1: undefined };
+  // Common CH pattern: "Flat 2, 9 Waterfront Mews" (optional comma after SAON)
+  const m = s1.match(SAON);
+  if (m) {
+    let after = s1.slice(m.index! + m[0].length).trim();
+    // Handle optional comma right after SAON, e.g., "Flat 2, 9 Waterfront Mews"
+    if (after.startsWith(',')) {
+      after = after.slice(1).trim();
+    }
+    const n = after.match(numToken);
+    if (n) {
+      const paonAndRest = after.slice(n.index!).trim(); // e.g., "9 Waterfront Mews"
+      return { unit: m[0], line1: paonAndRest };
+    }
+  }
+  // Fallback: if s1 starts with a number already, treat it as line1
+  if (numToken.test(s1)) return { unit: pre || undefined, line1: s1 };
+  return { unit: pre || undefined, line1: s1 };
+}
+
 function normalizedFromCandidate(candidate: any): NormalizedAddress {
   if (!candidate || typeof candidate !== 'object') {
     return normalizeAddressFragments({
@@ -60,10 +91,14 @@ function normalizedFromCandidate(candidate: any): NormalizedAddress {
     });
   }
 
+  // Use helper to split SAON/PAON from address_line_1 and premises
+  const split = splitSaonPaonLine(candidate.address_line_1 || candidate.premises, candidate.premises);
+  const unit = split.unit || candidate.saon || candidate.sub_building_name || candidate.po_box || candidate.care_of || '';
+  const line1Norm = split.line1 || candidate.address_line_1 || candidate.premises || '';
+  // Exclude unit from lines (do not treat SAON as part of street lines)
   const lines = [
-    candidate.saon || candidate.sub_building_name || candidate.po_box || candidate.care_of || '',
-    candidate.building_name || candidate.premises || candidate.organisation_name || '',
-    candidate.address_line_1 || candidate.premises || '',
+    candidate.building_name || candidate.organisation_name || '',
+    line1Norm,
     candidate.address_line_2 || candidate.address_line_3 || candidate.street_address || candidate.address_snippet || '',
     candidate.locality || candidate.town || candidate.post_town || '',
     candidate.region || candidate.county || '',
@@ -80,9 +115,9 @@ function normalizedFromCandidate(candidate: any): NormalizedAddress {
   const fullAddress = candidate.address_snippet || candidate.snippet || lines.join(', ');
 
   return normalizeAddressFragments({
-    unit: candidate.saon || candidate.sub_building_name || candidate.po_box || candidate.care_of,
-    saon: candidate.saon || candidate.sub_building_name || candidate.po_box || candidate.care_of,
-    buildingName: candidate.building_name || candidate.premises || candidate.organisation_name,
+    unit,
+    saon: unit,
+    buildingName: candidate.building_name || candidate.organisation_name,
     lines,
     town: candidate.locality || candidate.town || candidate.post_town || candidate.region,
     postcode,
@@ -666,6 +701,7 @@ export async function listCompanyDirectors(companyNumber: string): Promise<Compa
         appointedOn: item.appointed_on || undefined,
         officerRole: item.officer_role || undefined,
         officerId: item.links?.officer?.appointments?.split('/').pop(),
+        address: item.address || undefined,
         raw: item,
       }));
   } catch (err) {
