@@ -110,7 +110,23 @@ router.get('/progress/workflows', async (req, res) => {
 
   const rootsQ = `SELECT job_id, queue, name, status, data, created_at, updated_at
                     FROM job_progress
-                   WHERE queue IN ('ch-appointments','owner-discovery')
+                   WHERE queue = 'owner-discovery'
+                      OR (
+                           queue = 'ch-appointments'
+                       AND (
+                             data->>'rootJobId' IS NULL
+                          OR data->>'rootJobId' = ''
+                          OR data->>'rootJobId' = job_id
+                       )
+                      )
+                      OR (
+                           queue = 'company-discovery'
+                       AND (
+                             data->>'rootJobId' IS NULL
+                          OR data->>'rootJobId' = ''
+                       )
+                       AND COALESCE(data->>'requestSource','') NOT IN ('owner-discovery','ch-appointments')
+                      )
                    ORDER BY updated_at DESC
                    LIMIT ${limit}`;
   const { rows: roots } = await query(rootsQ);

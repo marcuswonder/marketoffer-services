@@ -39,11 +39,18 @@ router.post("/jobs/company-discovery", async (req, res) => {
     companyNumber: z.string().optional(),
     companyName: z.string().optional(),
     address: z.string().optional(),
-    postcode: z.string().optional()
+    postcode: z.string().optional(),
+    requestSource: z.string().optional(),
   });
   const data = schema.parse(req.body);
   const jobId = `co:${data.companyNumber || data.companyName}`;
-  await companyQ.add("discover", data, { jobId, attempts: 5, backoff: { type: "exponential", delay: 1500 } });
+  const payload = {
+    ...data,
+    requestSource: data.requestSource && data.requestSource.trim()
+      ? data.requestSource.trim()
+      : 'company-request',
+  };
+  await companyQ.add("discover", payload, { jobId, attempts: 5, backoff: { type: "exponential", delay: 1500 } });
   res.json({ jobId });
 });
 

@@ -1,7 +1,6 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
-import { connection } from "../queues/index.js";
-import { companyQ } from "../queues/index.js";
+import { connection, companyQ, personQ } from "../queues/index.js";
 import { chGetJson } from "../lib/companiesHouseClient.js";
 import { parseOfficerName, officerIdFromUrl, monthStr, nameMatches, normalizeWord } from "../lib/normalize.js";
 import { batchCreate } from "../lib/airtable.js";
@@ -10,6 +9,28 @@ import { initDb, startJob, logEvent, completeJob, failJob } from "../lib/progres
 import { query } from "../lib/db.js";
 
 const WRITE_TO_AIRTABLE = (process.env.WRITE_TO_AIRTABLE || "").toLowerCase() === 'true';
+
+function slugifyName(name: string): string {
+  const normalized = (name || '')
+    .toLowerCase()
+    .replace(/^(mr|mrs|ms|miss|dr|prof|sir|dame|lady|lord)\b\.?\s+/i, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || 'unknown';
+}
+
+async function logToJobAndRoot(
+  jobId: string,
+  rootJobId: string | undefined,
+  level: 'info' | 'warn' | 'error' | 'debug',
+  message: string,
+  data: Record<string, any>
+): Promise<void> {
+  await logEvent(jobId, level, message, data);
+  if (rootJobId && rootJobId !== jobId) {
+    await logEvent(rootJobId, level, message, { childJobId: jobId, ...data });
+  }
+}
 
 type CHOfficer = {
   name: string;
@@ -20,8 +41,8 @@ type CHOfficer = {
 
 await initDb();
 export default new Worker("ch-appointments", async job => {
-  const { companyNumber, firstName, lastName, contactId, rootJobId } = job.data as { companyNumber: string; firstName?: string; lastName?: string; contactId?: string; rootJobId?: string };
-  const pipelineRootId = rootJobId || (job.id as string);
+  const { companyNumber, firstName, lastName, contactId, rootJobId, ownerJobId } = job.data as { companyNumber: string; firstName?: string; lastName?: string; contactId?: string; rootJobId?: string; ownerJobId?: string };
+  const pipelineRootId = rootJobId || ownerJobId || (job.id as string);
   // console.log("companyNumber in initDB in workers/chAppointments.ts", companyNumber);
   // console.log("firstName in initDB in workers/chAppointments.ts", firstName);
   // console.log("lastName in initDB in workers/chAppointments.ts", lastName);
@@ -518,6 +539,87 @@ export default new Worker("ch-appointments", async job => {
     }
     const enriched = peopleRecords.map((r) => r._enriched);
 
+    const personEnqueued: Array<{ fullName: string; personJobId: string; appointments: number }> = [];
+    for (const person of enriched) {
+      const fullName = (person?.full_name || '').toString().trim();
+      if (!fullName) continue;
+      const slug = slugifyName(fullName);
+      const personJobId = `ch-person:${job.id}:${slug}`;
+      const appointments = Array.isArray(person?.appointments) ? person.appointments : [];
+      const appointmentSummary = appointments.slice(0, 25).map((appt: any) => ({
+        companyNumber: (appt?.company_number || '').toString(),
+        companyName: (appt?.company_name || '').toString(),
+        companyStatus: (appt?.company_status || '').toString(),
+        registeredPostcode: (appt?.registered_postcode || '').toString(),
+      }));
+      const payload = {
+        person: {
+          firstName: (person?.first_name || '').toString(),
+          middleNames: (person?.middle_names || '').toString(),
+          lastName: (person?.last_name || '').toString(),
+          dob: (person?.dob_string || '').toString(),
+        },
+        context: {
+          companyNumber,
+          companyName: (company?.company_name || '').toString(),
+          ownerJobId: ownerJobId || null,
+          appointments: appointmentSummary,
+          appointmentCount: appointmentSummary.length,
+          source: 'ch-appointments',
+        },
+        rootJobId: pipelineRootId,
+      };
+      try {
+        await query(
+          `INSERT INTO job_progress(job_id, queue, name, status, data)
+             VALUES ($1,'person-linkedin','discover','pending',$2)
+             ON CONFLICT (job_id)
+             DO UPDATE SET status='pending', data=$2, updated_at=now()`
+          , [personJobId, JSON.stringify(payload)]
+        );
+      } catch (e) {
+        await logToJobAndRoot(job.id as string, pipelineRootId, 'warn', 'Failed to upsert LinkedIn job progress from CH worker', {
+          personJobId,
+          error: String(e),
+        });
+      }
+      try {
+        await personQ.add('discover', payload, {
+          jobId: personJobId,
+          attempts: 5,
+          backoff: { type: 'exponential', delay: 2000 },
+        });
+        try {
+          await query(
+            `UPDATE ch_people
+                SET person_linkedin_job_ids = (
+                      SELECT ARRAY(SELECT DISTINCT UNNEST(COALESCE(ch_people.person_linkedin_job_ids,'{}') || ARRAY[$1::text]))
+                 ),
+                    updated_at = now()
+              WHERE job_id = $2`,
+            [personJobId, job.id as string]
+          );
+        } catch (err) {
+          await logToJobAndRoot(job.id as string, pipelineRootId, 'warn', 'Failed to tag LinkedIn job on CH people', {
+            personJobId,
+            error: String(err),
+          });
+        }
+        personEnqueued.push({ fullName, personJobId, appointments: appointmentSummary.length });
+      } catch (err) {
+        await logToJobAndRoot(job.id as string, pipelineRootId, 'warn', 'Failed to enqueue LinkedIn enrichment from CH worker', {
+          personJobId,
+          error: String(err),
+        });
+      }
+    }
+    if (personEnqueued.length) {
+      await logToJobAndRoot(job.id as string, pipelineRootId, 'info', 'Enqueued person-linkedin searches from CH appointments', {
+        ownerJobId: ownerJobId || null,
+        people: personEnqueued,
+      });
+    }
+
     // Build a unique company list from all appointments and prioritise ACTIVE
     type CoItem = { company_number: string; company_name: string; company_status: string; registered_address?: string; registered_postcode?: string };
     const coMap = new Map<string, CoItem>();
@@ -552,7 +654,15 @@ export default new Worker("ch-appointments", async job => {
       const jobId = `co:${job.id}:${c.company_number}`;
       await companyQ.add(
         "discover",
-        { companyNumber: c.company_number, companyName: c.company_name, address: c.registered_address, postcode: c.registered_postcode, rootJobId: pipelineRootId },
+        {
+          companyNumber: c.company_number,
+          companyName: c.company_name,
+          address: c.registered_address,
+          postcode: c.registered_postcode,
+          rootJobId: pipelineRootId,
+          requestSource: 'ch-appointments',
+          chJobId: job.id as string,
+        },
         { jobId, priority: 1, attempts: 5, backoff: { type: "exponential", delay: 1500 } }
       );
       try {

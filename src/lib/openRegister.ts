@@ -4,6 +4,16 @@ import { fetch } from 'undici';
 import { logger } from './logger.js';
 import { AddressInput, prettyAddress, normalizePostcode, addressVariants } from './address.js';
 
+export type OccupantCompanyRelation = {
+  role: 'director' | 'psc';
+  companyNumber?: string;
+  companyName?: string;
+  officerId?: string | null;
+  appointedOn?: string | null;
+  ceasedOn?: string | null;
+  source?: string;
+};
+
 export type OccupantRecord = {
   firstName: string;
   lastName: string;
@@ -14,6 +24,7 @@ export type OccupantRecord = {
   lastSeenYear?: number;
   dataSources: string[];
   indicators?: string[];
+  companyRelations?: OccupantCompanyRelation[];
 };
 
 export type OpenRegisterResult = {

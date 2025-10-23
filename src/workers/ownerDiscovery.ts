@@ -1,13 +1,13 @@
 import 'dotenv/config';
 import { Worker } from 'bullmq';
-import { connection, chQ, companyQ } from '../queues/index.js';
+import { connection, chQ, companyQ, personQ } from '../queues/index.js';
 import { initDb, startJob, logEvent, completeJob, failJob } from '../lib/progress.js';
 import { query } from '../lib/db.js';
 import { AddressInput, prettyAddress, addressKey } from '../lib/address.js';
 import { findCorporateOwner, searchCorporateOwnersByPostcode, fetchPricePaidTransactionsByPostcode, normalizeCorporateRecordAddress } from '../lib/landRegistry.js';
 import type { CorporateOwnerRecord, CorporateOwnerMatch, PricePaidTransaction } from '../lib/landRegistry.js';
 import { lookupOpenRegister } from '../lib/openRegister.js';
-import type { OccupantRecord } from '../lib/openRegister.js';
+import type { OccupantRecord, OccupantCompanyRelation } from '../lib/openRegister.js';
 import { scoreOccupants } from '../lib/homeownerRubric.js';
 import {
   searchCompaniesByAddress,
@@ -45,6 +45,35 @@ function normalizeName(name: string): string {
     .replace(/^(mr|mrs|ms|miss|dr|prof|sir|dame|lady|lord)\b\.?\s+/i, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function slugifyName(name: string): string {
+  const normalized = normalizeName(name);
+  const slug = normalized.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return slug || 'unknown';
+}
+
+function deriveNameParts(occ: OccupantRecord): { first: string; middle: string; last: string } {
+  const parsed = parseOfficerName(occ.fullName ?? '') || { first: '', middle: '', last: '' };
+  const first = (occ.firstName || parsed.first || '').trim();
+  const middle = (parsed.middle || '').trim();
+  const last = (occ.lastName || parsed.last || '').trim();
+  return { first, middle, last };
+}
+
+async function logToJobAndRoot(
+  jobId: string,
+  rootJobId: string | undefined,
+  level: 'info' | 'warn' | 'error' | 'debug',
+  message: string,
+  data: Record<string, any>,
+  rootExtra?: Record<string, any>
+): Promise<void> {
+  await logEvent(jobId, level, message, data);
+  if (rootJobId) {
+    const rootPayload = { childJobId: jobId, ...data, ...(rootExtra || {}) };
+    await logEvent(rootJobId, level, message, rootPayload);
+  }
 }
 
 async function upsertProperty(jobId: string, payload: OwnerDiscoveryJob): Promise<{ id: number }> {
@@ -552,6 +581,40 @@ function occupantRecordKey(rec: OccupantRecord): string {
   return normalizeName(name);
 }
 
+function mergeCompanyRelations(
+  existing?: OccupantCompanyRelation[] | null,
+  incoming?: OccupantCompanyRelation[] | null
+): OccupantCompanyRelation[] | undefined {
+  const combined = [
+    ...(Array.isArray(existing) ? existing : []),
+    ...(Array.isArray(incoming) ? incoming : []),
+  ];
+  if (!combined.length) return existing || incoming || undefined;
+  const deduped: OccupantCompanyRelation[] = [];
+  const keyFor = (rel: OccupantCompanyRelation) => {
+    const role = rel.role || 'unknown';
+    const company = (rel.companyNumber || '').toLowerCase();
+    const officer = (rel.officerId || '').toLowerCase();
+    return `${role}:${company}:${officer}`;
+  };
+  const seen = new Set<string>();
+  for (const rel of combined) {
+    if (!rel) continue;
+    const key = keyFor(rel);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push({
+      role: rel.role,
+      companyNumber: rel.companyNumber,
+      companyName: rel.companyName,
+      officerId: rel.officerId,
+      appointedOn: rel.appointedOn ?? null,
+      source: rel.source,
+    });
+  }
+  return deduped;
+}
+
 function addOrMergeOccupant(
   map: Map<string, OccupantRecord>,
   incoming: OccupantRecord
@@ -584,10 +647,185 @@ function addOrMergeOccupant(
       : (existing.lastSeenYear ?? incoming.lastSeenYear),
     dataSources: Array.from(new Set([...(existing.dataSources || []), ...(incoming.dataSources || [])])),
     indicators: Array.from(new Set([...(existing.indicators || []), ...(incoming.indicators || [])])),
+    companyRelations: mergeCompanyRelations(existing.companyRelations, incoming.companyRelations),
   };
 
   map.set(key, merged);
   return { added: false, merged: true, key };
+}
+
+async function enqueuePersonLinkedInJob(opts: {
+  ownerJobId: string;
+  rootJobId?: string;
+  occupant: OccupantRecord;
+  propertyAddress: string;
+  address: AddressInput;
+  registerSource?: string | null;
+  score: number;
+  rank: number;
+  latestSaleYear?: number | null;
+  reason: string;
+}): Promise<void> {
+  const { ownerJobId, rootJobId, occupant, propertyAddress, address, registerSource, score, rank, latestSaleYear, reason } = opts;
+  const { first, middle, last } = deriveNameParts(occupant);
+  const fullName = occupant.fullName || [first, middle, last].filter(Boolean).join(' ');
+  const slug = slugifyName(fullName);
+  const personJobId = `owner-person:${ownerJobId}:${slug}`;
+  const dob = typeof occupant.birthYear === 'number' && Number.isFinite(occupant.birthYear) ? String(occupant.birthYear) : '';
+  const companyNumbers = Array.from(
+    new Set((occupant.companyRelations || [])
+      .map((rel) => (rel?.companyNumber || '').trim())
+      .filter(Boolean))
+  );
+  const companyNames = Array.from(
+    new Set((occupant.companyRelations || [])
+      .map((rel) => (rel?.companyName || '').trim())
+      .filter(Boolean))
+  );
+  const payload = {
+    person: {
+      firstName: first,
+      middleNames: middle,
+      lastName: last,
+      dob,
+    },
+    context: {
+      propertyAddress,
+      postcode: address.postcode,
+      unit: address.unit || null,
+      city: address.city,
+      openRegister: {
+        source: registerSource || null,
+        firstSeenYear: occupant.firstSeenYear ?? null,
+        lastSeenYear: occupant.lastSeenYear ?? null,
+      },
+      ownerDiscovery: {
+        jobId: ownerJobId,
+        score,
+        rank,
+        dataSources: occupant.dataSources || [],
+        indicators: occupant.indicators || [],
+        companyNumbers,
+        companyNames,
+        latestSaleYear: latestSaleYear ?? null,
+        reason,
+      },
+    },
+    rootJobId: rootJobId || ownerJobId,
+  };
+
+  try {
+    await query(
+      `INSERT INTO job_progress(job_id, queue, name, status, data)
+         VALUES ($1,'person-linkedin','discover','pending',$2)
+         ON CONFLICT (job_id)
+         DO UPDATE SET status='pending', data=$2, updated_at=now()`,
+      [personJobId, JSON.stringify(payload)]
+    );
+  } catch (err) {
+    await logToJobAndRoot(ownerJobId, rootJobId, 'warn', 'Failed to upsert LinkedIn job progress', {
+      personJobId,
+      error: String(err),
+    });
+  }
+
+  try {
+    await personQ.add('discover', payload, {
+      jobId: personJobId,
+      attempts: 5,
+      backoff: { type: 'exponential', delay: 2000 },
+    });
+    await logToJobAndRoot(ownerJobId, rootJobId, 'info', 'Enqueued LinkedIn enrichment for owner candidate', {
+      personJobId,
+      occupantName: fullName,
+      score,
+      rank,
+      companyNumbers,
+      reason,
+    });
+  } catch (err) {
+    await logToJobAndRoot(ownerJobId, rootJobId, 'error', 'Failed to enqueue LinkedIn enrichment for owner candidate', {
+      personJobId,
+      occupantName: fullName,
+      error: String(err),
+    });
+  }
+}
+
+async function enqueueChAppointmentsForOwner(opts: {
+  ownerJobId: string;
+  rootJobId?: string;
+  occupant: OccupantRecord;
+  propertyAddress: string;
+  relations?: OccupantCompanyRelation[];
+  reason: string;
+  allowQueue: boolean;
+}): Promise<void> {
+  const { ownerJobId, rootJobId, occupant, propertyAddress, relations, reason, allowQueue } = opts;
+  if (!allowQueue) {
+    await logToJobAndRoot(ownerJobId, rootJobId, 'info', 'Skipping CH appointment enqueue for owner-director (flag disabled)', {
+      occupantName: occupant.fullName,
+      reason,
+    });
+    return;
+  }
+
+  const targets = (relations || []).filter((rel) => rel?.role === 'director' && (rel.companyNumber || '').trim());
+  if (!targets.length) {
+    await logToJobAndRoot(ownerJobId, rootJobId, 'info', 'No director relations available for CH enqueue', {
+      occupantName: occupant.fullName,
+      reason,
+    });
+    return;
+  }
+
+  const seen = new Set<string>();
+  const scheduled: Array<{ companyNumber: string; chJobId: string; officerId: string | null }> = [];
+  const { first, middle, last } = deriveNameParts(occupant);
+  for (const rel of targets) {
+    const companyNumber = (rel.companyNumber || '').trim();
+    if (!companyNumber) continue;
+    const dedupeKey = `${companyNumber}:${(rel.officerId || '').toLowerCase()}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    const slug = slugifyName(occupant.fullName || `${first} ${last}`);
+    const chJobId = `owner-ch:${ownerJobId}:${companyNumber}:${slug}`;
+    const payload: Record<string, any> = {
+      companyNumber,
+      firstName: first,
+      lastName: last,
+      rootJobId: rootJobId || ownerJobId,
+      source: 'owner-discovery-owner-linked',
+      ownerJobId,
+      occupantName: occupant.fullName,
+      relation: rel.role,
+      officerId: rel.officerId || null,
+      propertyAddress,
+    };
+    if (middle) payload.middleName = middle;
+    try {
+      await chQ.add('fetch', payload, {
+        jobId: chJobId,
+        attempts: 5,
+        backoff: { type: 'exponential', delay: 1000 },
+      });
+      scheduled.push({ companyNumber, chJobId, officerId: rel.officerId || null });
+    } catch (err) {
+      await logToJobAndRoot(ownerJobId, rootJobId, 'error', 'Failed to enqueue CH appointments for owner-director', {
+        chJobId,
+        companyNumber,
+        error: String(err),
+      });
+    }
+  }
+
+  if (scheduled.length) {
+    await logToJobAndRoot(ownerJobId, rootJobId, 'info', 'Enqueued Companies House appointment lookups for owner-director', {
+      occupantName: occupant.fullName,
+      scheduled,
+      reason,
+    });
+  }
 }
 
 // Helper to split SAON/PAON from address_line_1 or premises (local copy)
@@ -684,6 +922,17 @@ function occupantFromCompanyPerson(
   if (opts.company.companyNumber) {
     sources.push(`ch_company_${opts.company.companyNumber}`);
   }
+  const relations: OccupantCompanyRelation[] = [];
+  const baseRelation: OccupantCompanyRelation = {
+    role: opts.source,
+    companyNumber: opts.company.companyNumber || undefined,
+    companyName: opts.company.companyName || undefined,
+    officerId: opts.officer?.officerId || null,
+    appointedOn: opts.officer?.appointedOn || null,
+    ceasedOn: opts.psc?.ceasedOn || null,
+    source: opts.company.companyNumber ? `ch_company_${opts.company.companyNumber}` : undefined,
+  };
+  relations.push(baseRelation);
   return {
     firstName: parsed.first || '',
     lastName: parsed.last || '',
@@ -694,6 +943,7 @@ function occupantFromCompanyPerson(
     lastSeenYear: undefined,
     dataSources: Array.from(new Set(sources)),
     indicators,
+    companyRelations: relations,
   };
 }
 
@@ -1116,6 +1366,8 @@ export default new Worker<OwnerDiscoveryJob>(
                   address: pretty,
                   postcode: address.postcode,
                   rootJobId: rootJobId || undefined,
+                  ownerJobId: jobId,
+                  requestSource: 'owner-discovery',
                 },
                 { jobId: coJobId, attempts: 5, backoff: { type: 'exponential', delay: 1500 } }
               );
@@ -1321,6 +1573,105 @@ export default new Worker<OwnerDiscoveryJob>(
 
       const totalCandidates = candidates.length;
       const best = candidates[0];
+      const candidateByKey = new Map<string, (typeof candidates)[number]>();
+      for (const cand of candidates) {
+        candidateByKey.set(normalizeName(cand.fullName), cand);
+      }
+      const bestKey = best ? normalizeName(best.fullName) : null;
+      const bestOccupant = bestKey ? occupantMap.get(bestKey) : undefined;
+      const bestSources = new Set<string>([
+        ...((best?.sources || []) as string[]),
+        ...((bestOccupant?.dataSources || []) as string[]),
+      ]);
+      const bestIsOpenRegister = Boolean(bestKey && openRegisterKeys.has(bestKey));
+      const bestIsDirector = bestSources.has('companies_house_director');
+      const bestIsOfficer = bestSources.has('companies_house_officer');
+      const bestIsPsc = bestSources.has('companies_house_psc');
+      const openRegisterDetails = Array.from(openRegisterKeys).map((key) => {
+        const occupant = occupantMap.get(key);
+        const candidate = candidateByKey.get(key) || null;
+        const sources = new Set<string>(occupant?.dataSources || []);
+        const relations = occupant?.companyRelations || [];
+        return {
+          key,
+          name: occupant?.fullName || candidate?.fullName || '',
+          score: candidate?.score ?? null,
+          rank: candidate?.rank ?? null,
+          isDirector: sources.has('companies_house_director'),
+          isOfficer: sources.has('companies_house_officer'),
+          isPsc: sources.has('companies_house_psc'),
+          dataSources: occupant?.dataSources || [],
+          indicators: occupant?.indicators || [],
+          firstSeenYear: occupant?.firstSeenYear ?? null,
+          lastSeenYear: occupant?.lastSeenYear ?? null,
+          companyNumbers: Array.from(new Set((relations || []).map((rel) => rel?.companyNumber).filter(Boolean))) as string[],
+        };
+      });
+      const openRegisterSummary = openRegisterDetails.map((detail) => ({
+        name: detail.name,
+        score: detail.score,
+        rank: detail.rank,
+        isDirector: detail.isDirector,
+        isOfficer: detail.isOfficer,
+        isPsc: detail.isPsc,
+        companyNumbers: detail.companyNumbers,
+        firstSeenYear: detail.firstSeenYear,
+        lastSeenYear: detail.lastSeenYear,
+      }));
+      const ownerDetermined = Boolean(best && best.score >= ACCEPT_THRESHOLD && bestIsOpenRegister);
+      const ownerReviewCandidate = Boolean(best && best.score >= REVIEW_THRESHOLD && bestIsOpenRegister && best.score < ACCEPT_THRESHOLD);
+      let decisionScenario: string | null = null;
+      let scenarioResolution: Record<string, any> | null = null;
+
+      if (ownerDetermined && best && bestOccupant) {
+        decisionScenario = bestIsDirector || bestIsOfficer || bestIsPsc
+          ? 'open_register_owner_director'
+          : 'open_register_owner_individual';
+        scenarioResolution = {
+          scenario: decisionScenario,
+          ownerSources: Array.from(bestSources),
+          companyNumbers: Array.from(new Set((bestOccupant.companyRelations || []).map((rel) => rel?.companyNumber).filter(Boolean))),
+        };
+        await enqueuePersonLinkedInJob({
+          ownerJobId: jobId,
+          rootJobId,
+          occupant: bestOccupant,
+          propertyAddress: pretty,
+          address,
+          registerSource: register?.source || null,
+          score: best.score,
+          rank: best.rank,
+          latestSaleYear,
+          reason: decisionScenario,
+        });
+        if (bestIsDirector || bestIsOfficer) {
+          await enqueueChAppointmentsForOwner({
+            ownerJobId: jobId,
+            rootJobId,
+            occupant: bestOccupant,
+            propertyAddress: pretty,
+            relations: bestOccupant.companyRelations,
+            reason: decisionScenario,
+            allowQueue: AUTO_QUEUE_CH,
+          });
+        }
+      } else if (openRegisterKeys.size) {
+        const hasDirector = openRegisterDetails.some((detail) => detail.isDirector || detail.isOfficer);
+        decisionScenario = hasDirector
+          ? 'open_register_director_not_confirmed'
+          : 'open_register_not_confirmed';
+        scenarioResolution = {
+          scenario: decisionScenario,
+          openRegisterSummary,
+          thresholds: { accept: ACCEPT_THRESHOLD, review: REVIEW_THRESHOLD },
+        };
+        await logToJobAndRoot(jobId, rootJobId, hasDirector ? 'info' : 'info', 'Open register occupant present but no confirmed owner', {
+          scenario: decisionScenario,
+          openRegisterSummary,
+          bestCandidate: best ? { name: best.fullName, score: best.score, rank: best.rank } : null,
+          ownerReviewCandidate,
+        });
+      }
       let status = 'needs_title_register';
       let ownerType: 'individual' | null = null;
       let resolution: any = null;
@@ -1328,14 +1679,36 @@ export default new Worker<OwnerDiscoveryJob>(
       if (best && best.score >= ACCEPT_THRESHOLD) {
         status = 'resolved';
         ownerType = 'individual';
-        resolution = { ownerName: best.fullName, score: best.score, rank: best.rank, reason: 'score_above_accept_threshold' };
+        resolution = {
+          ownerName: best.fullName,
+          score: best.score,
+          rank: best.rank,
+          reason: 'score_above_accept_threshold',
+          scenario: decisionScenario,
+          sources: Array.from(bestSources),
+          openRegister: bestIsOpenRegister ? { source: register?.source || null } : null,
+        };
       } else if (best && best.score >= REVIEW_THRESHOLD) {
         status = 'needs_confirmation';
         ownerType = 'individual';
-        resolution = { ownerName: best.fullName, score: best.score, rank: best.rank, reason: 'score_between_review_bounds' };
+        resolution = {
+          ownerName: best.fullName,
+          score: best.score,
+          rank: best.rank,
+          reason: 'score_between_review_bounds',
+          scenario: decisionScenario,
+          sources: Array.from(bestSources),
+          openRegister: bestIsOpenRegister ? { source: register?.source || null } : null,
+        };
       } else if (!occupants.length && !officerHits.length && !companyHits.length) {
         status = 'no_public_data';
         resolution = { reason: 'no_open_data_hits' };
+      }
+
+      if (!resolution && scenarioResolution) {
+        resolution = scenarioResolution;
+      } else if (resolution && scenarioResolution) {
+        resolution = { ...resolution, ...scenarioResolution };
       }
 
       await query(
@@ -1370,6 +1743,7 @@ export default new Worker<OwnerDiscoveryJob>(
         occupantCount: occupants.length,
         officerHits: officerHits.length,
         companyMatches: companyHits.length,
+        scenario: decisionScenario,
       });
 
       await logEvent(jobId, 'info', 'Owner discovery complete', {
@@ -1377,6 +1751,7 @@ export default new Worker<OwnerDiscoveryJob>(
         ownerType,
         bestCandidate: best ? { name: best.fullName, score: best.score } : null,
         totalCandidates,
+        scenario: decisionScenario,
       });
       if (rootJobId) {
         await logEvent(rootJobId, 'info', 'Owner discovery summary', {
@@ -1384,6 +1759,7 @@ export default new Worker<OwnerDiscoveryJob>(
           status,
           ownerType,
           bestCandidate: best ? { name: best.fullName, score: Number(best.score?.toFixed?.(3) ?? best.score) } : null,
+          scenario: decisionScenario,
         });
       }
 

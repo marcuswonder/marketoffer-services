@@ -53,7 +53,18 @@ curl -X POST http://localhost:3000/api/jobs/ch-appointments \
 - Run workers (pick one):
   - `npm run dev:worker:ch`
   - `npm run dev:worker:company`
-  - `npm run dev:worker:person`
+- `npm run dev:worker:person`
+
+## Owner discovery workflow
+
+The `owner-discovery` worker now produces a single canonical log stream per request. When a job includes `rootJobId`, every downstream action (Companies House, company discovery, LinkedIn enrichment) mirrors its telemetry into that root job so `/requests/:id` shows the full trail. Outcomes are resolved as:
+
+- **Corporate owner found**: Land Registry match sets the property status to `corporate`, then enqueues a `ch-appointments` fetch (with propagated `rootJobId`). The CH worker scrapes directors/PSCs, persists them, triggers company discovery for each active appointment, and now spins up LinkedIn enrichment jobs per director.
+- **Open Register occupant present, no determination, not a director**: No queues are dispatched. The worker logs the scored candidates and the reasons evidence fell short so the request UI shows why no strong owner was recorded.
+- **Open Register occupant present, no determination, director**: As above, but the log includes the Companies House overlap so the reviewer knows which corporate links were found even though ownership confidence stayed below the accept threshold.
+- **Open Register owner confirmed, not a director**: The worker enqueues a `person-linkedin` job seeded with the Open Register data (name, tenure, address context). Results land back on the original owner job detail.
+- **Open Register owner confirmed, director**: The worker enqueues the targeted `ch-appointments` fetch for that director (respecting `OWNER_QUEUE_CH_DIRECTORS`) and also schedules LinkedIn enrichment. The CH worker downstream performs company discovery for each appointment and forwards LinkedIn lookups for the director profile.
+- **No open data**: When neither corporate nor Open Register/CH signals exist, the job resolves to `no_public_data` and logs that outcome at both the child and root job ids.
 
 ## Volumes (useful during resets)
 - List all: `docker volume ls`
