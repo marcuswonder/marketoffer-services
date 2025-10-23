@@ -35,6 +35,8 @@ const AUTO_QUEUE_COMPANY_DISCOVERY =
 export type OwnerDiscoveryJob = {
   address: AddressInput;
   rootJobId?: string;
+  parentJobId?: string;
+  requestSource?: string;
   metadata?: Record<string, any>;
   allowCorporateQueue?: boolean;
 };
@@ -712,15 +714,22 @@ async function enqueuePersonLinkedInJob(opts: {
       },
     },
     rootJobId: rootJobId || ownerJobId,
+    parentJobId: ownerJobId,
+    requestSource: 'owner-discovery',
   };
 
   try {
     await query(
-      `INSERT INTO job_progress(job_id, queue, name, status, data)
-         VALUES ($1,'person-linkedin','discover','pending',$2)
+      `INSERT INTO job_progress(job_id, queue, name, status, data, root_job_id, parent_job_id, request_source)
+         VALUES ($1,'person-linkedin','discover','pending',$2,$3,$4,$5)
          ON CONFLICT (job_id)
-         DO UPDATE SET status='pending', data=$2, updated_at=now()`,
-      [personJobId, JSON.stringify(payload)]
+         DO UPDATE SET status='pending',
+                       data=$2,
+                       root_job_id=$3,
+                       parent_job_id=$4,
+                       request_source=$5,
+                       updated_at=now()`,
+      [personJobId, JSON.stringify(payload), rootJobId || ownerJobId, ownerJobId, 'owner-discovery']
     );
   } catch (err) {
     await logToJobAndRoot(ownerJobId, rootJobId, 'warn', 'Failed to upsert LinkedIn job progress', {
@@ -801,6 +810,8 @@ async function enqueueChAppointmentsForOwner(opts: {
       relation: rel.role,
       officerId: rel.officerId || null,
       propertyAddress,
+      parentJobId: ownerJobId,
+      requestSource: 'owner-discovery',
     };
     if (middle) payload.middleName = middle;
     try {
@@ -952,7 +963,11 @@ export default new Worker<OwnerDiscoveryJob>(
   async (job) => {
     const rawPayload = job.data;
     const jobId = job.id as string;
-    const rootJobId = rawPayload.rootJobId;
+    const inheritedRoot =
+      typeof rawPayload.rootJobId === 'string' && rawPayload.rootJobId.trim()
+        ? rawPayload.rootJobId.trim()
+        : null;
+    const rootJobId = inheritedRoot || jobId;
     const baseAddr = rawPayload.address;
     if (!baseAddr?.line1 || !baseAddr?.city || !baseAddr?.postcode) {
       throw new Error('Address requires line1, city, and postcode');
@@ -978,8 +993,27 @@ export default new Worker<OwnerDiscoveryJob>(
       fullAddress: prettyAddress(address),
       source: 'owner_input',
     });
-    const payload = { ...rawPayload, address, normalizedAddress: targetNormalized };
-    await startJob({ jobId, queue: 'owner-discovery', name: job.name, payload });
+    const requestSource =
+      typeof rawPayload.requestSource === 'string' && rawPayload.requestSource.trim()
+        ? rawPayload.requestSource.trim()
+        : 'owner-discovery';
+    const payload = {
+      ...rawPayload,
+      rootJobId,
+      parentJobId: rawPayload.parentJobId || undefined,
+      requestSource,
+      address,
+      normalizedAddress: targetNormalized,
+    };
+    await startJob({
+      jobId,
+      queue: 'owner-discovery',
+      name: job.name,
+      payload,
+      rootJobId,
+      parentJobId: rawPayload.parentJobId || undefined,
+      requestSource,
+    });
     const pretty = prettyAddress(address);
 
     try {
@@ -1095,6 +1129,8 @@ export default new Worker<OwnerDiscoveryJob>(
               // Helpful context for downstream logging/debugging
               source: 'owner-discovery',
               propertyAddress: pretty,
+              parentJobId: jobId,
+              requestSource: 'owner-discovery',
             },
             { jobId: chJobId, attempts: 3, backoff: { type: 'exponential', delay: 1000 } }
           );
@@ -1368,6 +1404,7 @@ export default new Worker<OwnerDiscoveryJob>(
                   rootJobId: rootJobId || undefined,
                   ownerJobId: jobId,
                   requestSource: 'owner-discovery',
+                  parentJobId: jobId,
                 },
                 { jobId: coJobId, attempts: 5, backoff: { type: 'exponential', delay: 1500 } }
               );
@@ -1533,9 +1570,30 @@ export default new Worker<OwnerDiscoveryJob>(
       await clearCandidates(propertyId);
       await logEvent(jobId, 'debug', 'Cleared previous candidates for property', { propertyId });
       for (const cand of candidates) {
+        const normalizedFullName = normalizeName(cand.fullName);
+        const occupantMatch =
+          occupants.find((o) => normalizeName(o.fullName) === normalizedFullName) || null;
+        const relationCompanyNumbers = occupantMatch?.companyRelations
+          ? Array.from(
+              new Set(
+                occupantMatch.companyRelations
+                  .map((rel) => (rel?.companyNumber || '').trim())
+                  .filter(Boolean)
+              )
+            )
+          : [];
+        const relationOfficerIds = occupantMatch?.companyRelations
+          ? Array.from(
+              new Set(
+                occupantMatch.companyRelations
+                  .map((rel) => (rel?.officerId || '').trim())
+                  .filter(Boolean)
+              )
+            )
+          : [];
         const { rows } = await query<{ id: number }>(
-          `INSERT INTO owner_candidates (property_id, full_name, first_name, last_name, score, rank, sources, evidence)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+          `INSERT INTO owner_candidates (property_id, full_name, first_name, last_name, score, rank, sources, evidence, normalized_full_name, company_numbers, officer_ids)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
            RETURNING id`,
           [
             propertyId,
@@ -1545,7 +1603,10 @@ export default new Worker<OwnerDiscoveryJob>(
             cand.score,
             cand.rank,
             cand.sources,
-            JSON.stringify({ signals: cand.signals, occupant: occupants.find((o) => normalizeName(o.fullName) === normalizeName(cand.fullName)) || null }),
+            JSON.stringify({ signals: cand.signals, occupant: occupantMatch }),
+            normalizedFullName || null,
+            relationCompanyNumbers.length ? relationCompanyNumbers : null,
+            relationOfficerIds.length ? relationOfficerIds : null,
           ]
         );
         const candidateId = rows[0].id;

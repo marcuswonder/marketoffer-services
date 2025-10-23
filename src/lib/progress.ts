@@ -1,8 +1,9 @@
 import { query, ensureConnection } from './db.js';
 import { logger } from './logger.js';
 
-// Cache jobId -> queue to enrich events without extra DB lookups
+// Cache jobId -> queue/root to enrich events without extra DB lookups
 const jobQueueCache = new Map<string, string>();
+const jobRootCache = new Map<string, string>();
 
 function slugify(s: string) {
   return (s || '')
@@ -21,6 +22,9 @@ export async function initDb() {
       name TEXT NOT NULL,
       status TEXT NOT NULL,
       data JSONB,
+      root_job_id TEXT,
+      parent_job_id TEXT,
+      request_source TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
@@ -28,6 +32,7 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS job_events (
       id BIGSERIAL PRIMARY KEY,
       job_id TEXT NOT NULL,
+      root_job_id TEXT,
       ts TIMESTAMPTZ NOT NULL DEFAULT now(),
       level TEXT NOT NULL,
       message TEXT NOT NULL,
@@ -86,6 +91,15 @@ export async function initDb() {
     );
 
     -- Backfill columns for existing deployments
+    ALTER TABLE job_progress ADD COLUMN IF NOT EXISTS root_job_id TEXT;
+    ALTER TABLE job_progress ADD COLUMN IF NOT EXISTS parent_job_id TEXT;
+    ALTER TABLE job_progress ADD COLUMN IF NOT EXISTS request_source TEXT;
+    ALTER TABLE job_events ADD COLUMN IF NOT EXISTS root_job_id TEXT;
+
+    CREATE INDEX IF NOT EXISTS job_progress_root_idx ON job_progress(root_job_id);
+    CREATE INDEX IF NOT EXISTS job_progress_parent_idx ON job_progress(parent_job_id);
+    CREATE INDEX IF NOT EXISTS job_events_root_idx ON job_events(root_job_id);
+
     ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS nationality TEXT;
     ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS company_status TEXT;
     ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS trading_name TEXT;
@@ -128,6 +142,10 @@ export async function initDb() {
       rank INTEGER,
       sources TEXT[],
       evidence JSONB,
+      normalized_full_name TEXT,
+      company_numbers TEXT[],
+      officer_ids TEXT[],
+      ch_person_id BIGINT REFERENCES ch_people(id),
       outcome TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -164,6 +182,12 @@ export async function initDb() {
       row_count INTEGER
     );
 
+    ALTER TABLE owner_candidates ADD COLUMN IF NOT EXISTS normalized_full_name TEXT;
+    ALTER TABLE owner_candidates ADD COLUMN IF NOT EXISTS company_numbers TEXT[];
+    ALTER TABLE owner_candidates ADD COLUMN IF NOT EXISTS officer_ids TEXT[];
+    ALTER TABLE owner_candidates ADD COLUMN IF NOT EXISTS ch_person_id BIGINT REFERENCES ch_people(id);
+    CREATE INDEX IF NOT EXISTS owner_candidates_normalized_idx ON owner_candidates(normalized_full_name);
+
     ALTER TABLE land_registry_corporate_meta ADD COLUMN IF NOT EXISTS dataset_label TEXT;
     ALTER TABLE land_registry_corporate_meta ADD COLUMN IF NOT EXISTS last_refreshed_at TIMESTAMPTZ;
     ALTER TABLE land_registry_corporate_meta ADD COLUMN IF NOT EXISTS source_url TEXT;
@@ -173,48 +197,107 @@ export async function initDb() {
   `);
 }
 
-export async function startJob(opts: { jobId: string; queue: string; name: string; payload?: any }) {
-  const { jobId, queue, name, payload } = opts;
+export type StartJobOptions = {
+  jobId: string;
+  queue: string;
+  name: string;
+  payload?: any;
+  rootJobId?: string | null;
+  parentJobId?: string | null;
+  requestSource?: string | null;
+};
+
+export async function startJob(opts: StartJobOptions) {
+  const { jobId, queue, name, payload, rootJobId, parentJobId, requestSource } = opts;
+  const resolvedRoot = (rootJobId && rootJobId.trim()) || jobId;
+  const resolvedParent = parentJobId && parentJobId.trim() ? parentJobId.trim() : null;
+  const resolvedSource = requestSource && requestSource.trim() ? requestSource.trim() : null;
   console.log('jobId in startJob in lib/progress.ts', jobId);
   console.log('queue in startJob in lib/progress.ts', queue);
   console.log('name in startJob in lib/progress.ts', name);
-  console.log('payload in startJob in lib/progress.ts', payload);   
-  
+  console.log('payload in startJob in lib/progress.ts', payload);
+  console.log('rootJobId in startJob in lib/progress.ts', resolvedRoot);
+  console.log('parentJobId in startJob in lib/progress.ts', resolvedParent);
+  console.log('requestSource in startJob in lib/progress.ts', resolvedSource);
+
   await query(
-    `INSERT INTO job_progress(job_id, queue, name, status, data)
-     VALUES ($1,$2,$3,'running',$4)
+    `INSERT INTO job_progress(job_id, queue, name, status, data, root_job_id, parent_job_id, request_source)
+     VALUES ($1,$2,$3,'running',$4,$5,$6,$7)
      ON CONFLICT (job_id)
-     DO UPDATE SET status='running', data=$4, updated_at=now()`,
-    [jobId, queue, name, payload ? JSON.stringify(payload) : null]
+     DO UPDATE SET status='running',
+                   data=$4,
+                   root_job_id=$5,
+                   parent_job_id=$6,
+                   request_source=$7,
+                   updated_at=now()`,
+    [
+      jobId,
+      queue,
+      name,
+      payload ? JSON.stringify(payload) : null,
+      resolvedRoot,
+      resolvedParent,
+      resolvedSource,
+    ]
   );
-  try { jobQueueCache.set(jobId, queue); } catch {}
+  try {
+    jobQueueCache.set(jobId, queue);
+    jobRootCache.set(jobId, resolvedRoot);
+  } catch {}
+}
+
+async function getJobQueue(jobId: string): Promise<string> {
+  let q = jobQueueCache.get(jobId);
+  if (q) return q;
+  try {
+    const { rows } = await query<{ queue: string }>(
+      `SELECT queue FROM job_progress WHERE job_id = $1 LIMIT 1`,
+      [jobId]
+    );
+    q = rows?.[0]?.queue || 'general';
+  } catch {
+    q = 'general';
+  }
+  jobQueueCache.set(jobId, q);
+  return q;
+}
+
+async function getJobRoot(jobId: string): Promise<string> {
+  let root = jobRootCache.get(jobId);
+  if (root) return root;
+  try {
+    const { rows } = await query<{ root_job_id: string | null }>(
+      `SELECT root_job_id FROM job_progress WHERE job_id = $1 LIMIT 1`,
+      [jobId]
+    );
+    root = rows?.[0]?.root_job_id || jobId;
+  } catch {
+    root = jobId;
+  }
+  jobRootCache.set(jobId, root);
+  return root;
 }
 
 export async function logEvent(jobId: string, level: 'debug'|'info'|'warn'|'error', message: string, data?: any) {
   // Enrich with scope/category/code when not provided
   let enriched: any = data && typeof data === 'object' ? { ...data } : {};
+  const rootJobId = await getJobRoot(jobId);
   if (!('scope' in enriched)) {
     enriched.scope = level === 'debug' ? 'trace' : (level === 'info' ? 'detail' : 'summary');
   }
   if (!('category' in enriched) || !enriched.category) {
-    let q = jobQueueCache.get(jobId);
-    if (!q) {
-      try {
-        const { rows } = await query<{ queue: string }>(`SELECT queue FROM job_progress WHERE job_id = $1 LIMIT 1`, [jobId]);
-        q = rows?.[0]?.queue || 'general';
-        jobQueueCache.set(jobId, q);
-      } catch {
-        q = 'general';
-      }
-    }
+    const q = await getJobQueue(jobId);
     enriched.category = q;
   }
   if (!('code' in enriched) || !enriched.code) {
     enriched.code = `${enriched.category}.${slugify(message)}`;
   }
+  if (!('rootJobId' in enriched)) {
+    enriched.rootJobId = rootJobId;
+  }
   await query(
-    `INSERT INTO job_events(job_id, level, message, data) VALUES ($1,$2,$3,$4)`,
-    [jobId, level, message, JSON.stringify(enriched)]
+    `INSERT INTO job_events(job_id, root_job_id, level, message, data) VALUES ($1,$2,$3,$4,$5)`,
+    [jobId, rootJobId, level, message, JSON.stringify(enriched)]
   );
 }
 

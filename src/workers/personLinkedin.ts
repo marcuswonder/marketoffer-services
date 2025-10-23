@@ -202,8 +202,20 @@ type PersonSearchPayload = {
 };
 
 export default new Worker("person-linkedin", async job => {
-  const { personId, person, context, rootJobId } = job.data as PersonSearchPayload;
-  await startJob({ jobId: job.id as string, queue: 'person-linkedin', name: job.name, payload: job.data });
+  const { personId, person, context, rootJobId, parentJobId, requestSource } = job.data as PersonSearchPayload & {
+    parentJobId?: string;
+    requestSource?: string;
+  };
+  const resolvedRoot = rootJobId || (job.id as string);
+  await startJob({
+    jobId: job.id as string,
+    queue: 'person-linkedin',
+    name: job.name,
+    payload: job.data,
+    rootJobId: resolvedRoot,
+    parentJobId: parentJobId || null,
+    requestSource: requestSource || 'person-linkedin',
+  });
   try {
     // High-level: record job receipt for timeline visibility
     await logEvent(job.id as string, 'info', 'Person LI job received', {

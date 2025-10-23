@@ -53,14 +53,14 @@ async function deleteWorkflowRecords(rootJobId: string) {
        WHERE job_id IN (
          SELECT job_id
            FROM job_progress
-          WHERE job_id = $1 OR data->>'rootJobId' = $1
+          WHERE job_id = $1 OR COALESCE(root_job_id, data->>'rootJobId') = $1
        )`,
     [rootJobId]
   );
 
   await query(
     `DELETE FROM job_progress
-       WHERE job_id = $1 OR data->>'rootJobId' = $1`,
+       WHERE job_id = $1 OR COALESCE(root_job_id, data->>'rootJobId') = $1`,
     [rootJobId]
   );
 }
@@ -134,10 +134,10 @@ router.get('/progress/workflows', async (req, res) => {
   const out: any[] = [];
   for (const r of roots) {
     const rootId = r.job_id as string;
-    const countsQ = `SELECT queue, status, COUNT(*)::int AS c
-                       FROM job_progress
-                      WHERE data->>'rootJobId' = $1
-                      GROUP BY queue, status`;
+  const countsQ = `SELECT queue, status, COUNT(*)::int AS c
+                     FROM job_progress
+                    WHERE COALESCE(root_job_id, data->>'rootJobId') = $1
+                    GROUP BY queue, status`;
     const { rows: counts } = await query(countsQ, [rootId]);
     const summarize = (q: string) => {
       const byQ = counts.filter((x: any) => x.queue === q);
@@ -173,7 +173,7 @@ router.get('/progress/workflows/:rootJobId', async (req, res) => {
 
   const jobsQ = `SELECT job_id, queue, name, status, data, created_at, updated_at
                    FROM job_progress
-                  WHERE job_id = $1 OR data->>'rootJobId' = $1
+                  WHERE job_id = $1 OR COALESCE(root_job_id, data->>'rootJobId') = $1
                   ORDER BY updated_at DESC`;
   const { rows: jobs } = await query(jobsQ, [rootJobId]);
 
@@ -192,7 +192,7 @@ router.get('/progress/workflows/:rootJobId', async (req, res) => {
 // Workflow timeline: all events across child jobs ordered by time
 router.get('/progress/workflows/:rootJobId/timeline', async (req, res) => {
   const { rootJobId } = z.object({ rootJobId: z.string().min(1) }).parse(req.params as any);
-  const jobsQ = `SELECT job_id FROM job_progress WHERE job_id = $1 OR data->>'rootJobId' = $1`;
+  const jobsQ = `SELECT job_id FROM job_progress WHERE job_id = $1 OR COALESCE(root_job_id, data->>'rootJobId') = $1`;
   const { rows: jobRows } = await query<{ job_id: string }>(jobsQ, [rootJobId]);
   if (!jobRows.length) return res.json({ events: [], jobs: [] });
   const ids = jobRows.map(r => r.job_id);

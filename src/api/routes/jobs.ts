@@ -10,7 +10,7 @@ router.post("/jobs/ch-appointments", async (req, res) => {
   const source: any = { ...(req.query || {}), ...(req.body || {}) };
   // Treat empty strings as undefined for optional fields
   const cleaned: any = { ...source };
-  ["firstName", "lastName", "contactId"].forEach(k => {
+  ["firstName", "lastName", "contactId", "rootJobId", "parentJobId", "requestSource"].forEach(k => {
     if (typeof cleaned[k] === 'string' && cleaned[k].trim() === '') delete cleaned[k];
   });
   const schema = z.object({
@@ -18,17 +18,28 @@ router.post("/jobs/ch-appointments", async (req, res) => {
     firstName: z.string().min(1).optional(),
     lastName: z.string().min(1).optional(),
     contactId: z.string().min(3).optional(),
+    rootJobId: z.string().optional(),
+    parentJobId: z.string().optional(),
+    requestSource: z.string().optional(),
   });
   const parsed = schema.safeParse(cleaned);
   if (!parsed.success) {
     return res.status(400).json({ error: 'invalid_request', issues: parsed.error.issues });
   }
-  const { companyNumber, firstName, lastName, contactId } = parsed.data;
+  const { companyNumber, firstName, lastName, contactId, rootJobId, parentJobId, requestSource } = parsed.data;
 
   const jobId = `ch:${companyNumber}:${(firstName || "").toLowerCase()}:${(lastName || "").toLowerCase()}:${contactId || ""}`;
   await chQ.add(
     "fetch",
-    { companyNumber, firstName, lastName, contactId },
+    {
+      companyNumber,
+      firstName,
+      lastName,
+      contactId,
+      rootJobId: rootJobId || undefined,
+      parentJobId: parentJobId || undefined,
+      requestSource: requestSource && requestSource.trim() ? requestSource.trim() : 'ch-request',
+    },
     { jobId, attempts: 5, backoff: { type: "exponential", delay: 1000 } }
   );
   res.json({ jobId });
@@ -41,6 +52,8 @@ router.post("/jobs/company-discovery", async (req, res) => {
     address: z.string().optional(),
     postcode: z.string().optional(),
     requestSource: z.string().optional(),
+    rootJobId: z.string().optional(),
+    parentJobId: z.string().optional(),
   });
   const data = schema.parse(req.body);
   const jobId = `co:${data.companyNumber || data.companyName}`;

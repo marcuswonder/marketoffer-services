@@ -19,6 +19,15 @@ function slugifyName(name: string): string {
   return normalized || 'unknown';
 }
 
+function normalizePersonName(name: string): string {
+  return (name || '')
+    .toLowerCase()
+    .replace(/^(mr|mrs|ms|miss|dr|prof|sir|dame|lady|lord)\b\.?\s+/i, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 async function logToJobAndRoot(
   jobId: string,
   rootJobId: string | undefined,
@@ -41,14 +50,40 @@ type CHOfficer = {
 
 await initDb();
 export default new Worker("ch-appointments", async job => {
-  const { companyNumber, firstName, lastName, contactId, rootJobId, ownerJobId } = job.data as { companyNumber: string; firstName?: string; lastName?: string; contactId?: string; rootJobId?: string; ownerJobId?: string };
+  const {
+    companyNumber,
+    firstName,
+    lastName,
+    contactId,
+    rootJobId,
+    ownerJobId,
+    parentJobId,
+    requestSource,
+  } = job.data as {
+    companyNumber: string;
+    firstName?: string;
+    lastName?: string;
+    contactId?: string;
+    rootJobId?: string;
+    ownerJobId?: string;
+    parentJobId?: string;
+    requestSource?: string;
+  };
   const pipelineRootId = rootJobId || ownerJobId || (job.id as string);
   // console.log("companyNumber in initDB in workers/chAppointments.ts", companyNumber);
   // console.log("firstName in initDB in workers/chAppointments.ts", firstName);
   // console.log("lastName in initDB in workers/chAppointments.ts", lastName);
   // console.log("contactId in initDB in workers/chAppointments.ts", contactId);
 
-  await startJob({ jobId: job.id as string, queue: 'ch-appointments', name: job.name, payload: job.data });
+  await startJob({
+    jobId: job.id as string,
+    queue: 'ch-appointments',
+    name: job.name,
+    payload: job.data,
+    rootJobId: pipelineRootId,
+    parentJobId: parentJobId || ownerJobId || null,
+    requestSource: requestSource || 'ch-appointments',
+  });
 
   try {
       const company = await chGetJson<any>(`/company/${companyNumber}`);
@@ -525,6 +560,55 @@ export default new Worker("ch-appointments", async job => {
             );
           }
         }
+        if (personId && ownerJobId) {
+          const normalized = normalizePersonName(
+            (e.full_name || `${e.first_name || ''} ${e.last_name || ''}`).toString()
+          );
+          if (normalized) {
+            const companyNumbersFromAppointments = Array.isArray(e.appointments)
+              ? Array.from(
+                  new Set(
+                    e.appointments
+                      .map((app: any) => (app?.company_number || '').toString().trim())
+                      .filter(Boolean)
+                  )
+                )
+              : [];
+            try {
+              await query(
+                `UPDATE owner_candidates
+                    SET ch_person_id = COALESCE(ch_person_id, $1),
+                        company_numbers = ARRAY(SELECT DISTINCT UNNEST(COALESCE(company_numbers,'{}') || $4::text[])),
+                        officer_ids = ARRAY(SELECT DISTINCT UNNEST(COALESCE(officer_ids,'{}') || $5::text[])),
+                        updated_at = now()
+                  WHERE property_id = (
+                          SELECT id FROM owner_properties WHERE job_id = $2 LIMIT 1
+                        )
+                    AND normalized_full_name = $3`,
+                [
+                  personId,
+                  ownerJobId,
+                  normalized,
+                  companyNumbersFromAppointments.length ? companyNumbersFromAppointments : null,
+                  officerIds.length ? officerIds : null,
+                ]
+              );
+            } catch (err) {
+              await logToJobAndRoot(
+                job.id as string,
+                pipelineRootId,
+                'warn',
+                'Failed to link CH person to owner candidate',
+                {
+                  ownerJobId,
+                  personId,
+                  normalized,
+                  error: String(err),
+                }
+              );
+            }
+          }
+        }
       }
       pgPeopleWritten = peopleRecords.length;
       pgAppointmentsWritten = totalAppts;
@@ -568,14 +652,21 @@ export default new Worker("ch-appointments", async job => {
           source: 'ch-appointments',
         },
         rootJobId: pipelineRootId,
+        parentJobId: job.id as string,
+        requestSource: 'ch-appointments',
       };
       try {
         await query(
-          `INSERT INTO job_progress(job_id, queue, name, status, data)
-             VALUES ($1,'person-linkedin','discover','pending',$2)
+          `INSERT INTO job_progress(job_id, queue, name, status, data, root_job_id, parent_job_id, request_source)
+             VALUES ($1,'person-linkedin','discover','pending',$2,$3,$4,$5)
              ON CONFLICT (job_id)
-             DO UPDATE SET status='pending', data=$2, updated_at=now()`
-          , [personJobId, JSON.stringify(payload)]
+             DO UPDATE SET status='pending',
+                           data=$2,
+                           root_job_id=$3,
+                           parent_job_id=$4,
+                           request_source=$5,
+                           updated_at=now()`,
+          [personJobId, JSON.stringify(payload), pipelineRootId, job.id as string, 'ch-appointments']
         );
       } catch (e) {
         await logToJobAndRoot(job.id as string, pipelineRootId, 'warn', 'Failed to upsert LinkedIn job progress from CH worker', {
@@ -662,6 +753,8 @@ export default new Worker("ch-appointments", async job => {
           rootJobId: pipelineRootId,
           requestSource: 'ch-appointments',
           chJobId: job.id as string,
+          parentJobId: job.id as string,
+          ownerJobId: ownerJobId || null,
         },
         { jobId, priority: 1, attempts: 5, backoff: { type: "exponential", delay: 1500 } }
       );

@@ -56,8 +56,27 @@ function asArray<T = any>(val: any): T[] {
 
 await initDb();
 export default new Worker("company-discovery", async job => {
-  const { companyNumber, companyName, address, postcode, rootJobId } = job.data as any;
-  await startJob({ jobId: job.id as string, queue: 'company-discovery', name: job.name, payload: job.data });
+  const {
+    companyNumber,
+    companyName,
+    address,
+    postcode,
+    rootJobId,
+    parentJobId,
+    requestSource,
+    ownerJobId,
+    chJobId,
+  } = job.data as any;
+  const resolvedRoot = rootJobId || ownerJobId || chJobId || (job.id as string);
+  await startJob({
+    jobId: job.id as string,
+    queue: 'company-discovery',
+    name: job.name,
+    payload: job.data,
+    rootJobId: resolvedRoot,
+    parentJobId: parentJobId || chJobId || ownerJobId || null,
+    requestSource: requestSource || 'company-discovery',
+  });
   try {
     const cleaned = cleanCompanyName(companyName || "");
     // Gather SIC codes and director names from our DB if available
@@ -312,31 +331,53 @@ Return strict JSON with both decision certainty and ownership likelihood:
 
     let enqueued = 0;
     for (const host of potentials) {
-      const jobId = `site:${rootJobId || job.id}:${host}`;
-      const payload = { host, companyNumber, companyName, address, postcode, rootJobId };
+      const jobId = `site:${resolvedRoot}:${host}`;
+      const payload = {
+        host,
+        companyNumber,
+        companyName,
+        address,
+        postcode,
+        rootJobId: resolvedRoot,
+        parentJobId: job.id as string,
+        requestSource: requestSource || 'company-discovery',
+      };
       // Mark as pending in job_progress so the workflow finalizer can wait on both pending and running
       try {
         await query(
-          `INSERT INTO job_progress(job_id, queue, name, status, data)
-           VALUES ($1,'site-fetch','fetch','pending',$2)
+          `INSERT INTO job_progress(job_id, queue, name, status, data, root_job_id, parent_job_id, request_source)
+           VALUES ($1,'site-fetch','fetch','pending',$2,$3,$4,$5)
            ON CONFLICT (job_id)
-           DO UPDATE SET status='pending', data=$2, updated_at=now()`,
-          [jobId, JSON.stringify(payload)]
+           DO UPDATE SET status='pending',
+                         data=$2,
+                         root_job_id=$3,
+                         parent_job_id=$4,
+                         request_source=$5,
+                         updated_at=now()`,
+          [jobId, JSON.stringify(payload), resolvedRoot, job.id as string, requestSource || 'company-discovery']
         );
       } catch {}
-      await siteFetchQ.add('fetch', payload, { jobId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
-      if (rootJobId) {
+      await siteFetchQ.add('fetch', payload, {
+        jobId,
+        attempts: 5,
+        backoff: { type: 'exponential', delay: 2000 },
+      });
+      if (resolvedRoot) {
         try {
           await query(
             `UPDATE ch_people
                 SET sitefetch_job_ids = (
                       SELECT ARRAY(SELECT DISTINCT UNNEST(COALESCE(ch_people.sitefetch_job_ids,'{}') || ARRAY[$1::text]))
                  )
-              WHERE job_id = $2`,
-            [jobId, rootJobId]
+              WHERE root_job_id = $2`,
+            [jobId, resolvedRoot]
           );
         } catch (e) {
-          await logEvent(job.id as string, 'warn', 'Failed to tag site-fetch job on people', { error: String(e), jobId, rootJobId });
+          await logEvent(job.id as string, 'warn', 'Failed to tag site-fetch job on people', {
+            error: String(e),
+            jobId,
+            rootJobId: resolvedRoot,
+          });
         }
       }
       enqueued++;
@@ -346,12 +387,12 @@ Return strict JSON with both decision certainty and ownership likelihood:
 
     // If this workflow uses a rootJobId, and if all discovery work is finished (no running company-discovery or site-fetch),
     // kick off person-linkedin here as a safety net (e.g., when no sites were found for any company).
-    if (rootJobId) {
+    if (resolvedRoot) {
       try {
         // Load expected companies for this workflow from the ch-appointments root progress record
         const { rows: progRows } = await query<{ data: any }>(
           `SELECT data FROM job_progress WHERE job_id = $1`,
-          [rootJobId]
+          [resolvedRoot]
         );
         const rootData = progRows?.[0]?.data || null;
         const expectedCompanies: string[] = Array.isArray(rootData?.enqueued?.companies) ? rootData.enqueued.companies : [];
@@ -362,8 +403,8 @@ Return strict JSON with both decision certainty and ownership likelihood:
              FROM job_progress
             WHERE status IN ('pending','running')
               AND (queue = 'company-discovery' OR queue = 'site-fetch')
-              AND data->>'rootJobId' = $1`,
-          [rootJobId]
+              AND COALESCE(root_job_id, data->>'rootJobId') = $1`,
+          [resolvedRoot]
         );
         const runningCount = Number(runningAll?.[0]?.c || 0);
 
@@ -375,9 +416,9 @@ Return strict JSON with both decision certainty and ownership likelihood:
                FROM job_progress
               WHERE queue = 'company-discovery'
                 AND status = 'completed'
-                AND data->>'rootJobId' = $1
+                AND COALESCE(root_job_id, data->>'rootJobId') = $1
                 AND (data->>'companyNumber') = ANY($2::text[])`,
-            [rootJobId, expectedCompanies]
+            [resolvedRoot, expectedCompanies]
           );
           completedCompanies = Number(compRows?.[0]?.c || 0);
         }
@@ -385,10 +426,10 @@ Return strict JSON with both decision certainty and ownership likelihood:
         if (runningCount === 0 && (!expectedCompanies.length || completedCompanies === expectedCompanies.length)) {
           // Enqueue person-linkedin for each person in this workflow with aggregated context across their appointments
           const { rows: people } = await query<{ id: number; first_name: string | null; middle_names: string | null; last_name: string | null; dob_string: string | null }>(
-            `SELECT DISTINCT p.id, p.first_name, p.middle_names, p.last_name, p.dob_string
-               FROM ch_people p
-              WHERE p.job_id = $1`,
-            [rootJobId]
+           `SELECT DISTINCT p.id, p.first_name, p.middle_names, p.last_name, p.dob_string
+              FROM ch_people p
+              WHERE p.root_job_id = $1`,
+            [resolvedRoot]
           );
           let enq = 0;
           for (const p of people) {
@@ -432,33 +473,44 @@ Return strict JSON with both decision certainty and ownership likelihood:
             );
             const companyNameForContext = (cnRows?.[0]?.company_name || '').toString();
 
-            const pjId = `person:${(p as any).id}:${rootJobId}`;
+            const pjId = `person:${(p as any).id}:${resolvedRoot}`;
             const payload = {
               person: { firstName: p.first_name || '', middleNames: p.middle_names || '', lastName: p.last_name || '', dob: p.dob_string || '' },
               context: { companyName: companyNameForContext, websites: aggWebsites, companyLinkedIns: aggCompanyLIs, personalLinkedIns: aggPersonalLIs },
-              rootJobId
+              rootJobId: resolvedRoot,
+              parentJobId: job.id as string,
+              requestSource: requestSource || 'company-discovery',
             };
             try {
               await query(
-                `INSERT INTO job_progress(job_id, queue, name, status, data)
-                 VALUES ($1,'person-linkedin','discover','pending',$2)
+                `INSERT INTO job_progress(job_id, queue, name, status, data, root_job_id, parent_job_id, request_source)
+                 VALUES ($1,'person-linkedin','discover','pending',$2,$3,$4,$5)
                  ON CONFLICT (job_id)
-                 DO UPDATE SET status='pending', data=$2, updated_at=now()`,
-                [pjId, JSON.stringify(payload)]
+                 DO UPDATE SET status='pending',
+                               data=$2,
+                               root_job_id=$3,
+                               parent_job_id=$4,
+                               request_source=$5,
+                               updated_at=now()`,
+                [pjId, JSON.stringify(payload), resolvedRoot, job.id as string, requestSource || 'company-discovery']
               );
             } catch {}
-            await personQ.add('discover', payload, { jobId: pjId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
+            await personQ.add('discover', payload, {
+              jobId: pjId,
+              attempts: 5,
+              backoff: { type: 'exponential', delay: 2000 },
+            });
             enq++;
           }
-          await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after ALL discovery complete (no site-fetch jobs)', { rootJobId, people: people.length, enqueued: enq });
+          await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after ALL discovery complete (no site-fetch jobs)', { rootJobId: resolvedRoot, people: people.length, enqueued: enq });
         }
       } catch (e) {
-        await logEvent(job.id as string, 'error', 'Finalization check failed in company-discovery', { error: String(e), rootJobId });
+        await logEvent(job.id as string, 'error', 'Finalization check failed in company-discovery', { error: String(e), rootJobId: resolvedRoot });
       }
     }
 
     // site-fetch worker will persist results and enqueue person-linkedin after aggregation
-    await completeJob(job.id as string, { companyNumber, companyName, candidates: potentials.length, enqueuedSiteFetch: enqueued, rootJobId });
+    await completeJob(job.id as string, { companyNumber, companyName, candidates: potentials.length, enqueuedSiteFetch: enqueued, rootJobId: resolvedRoot });
     logger.info({ companyNumber, candidates: potentials.length, enqueuedSiteFetch: enqueued }, 'Company discovery dispatched to site-fetch');
     return;
   } catch (err) {

@@ -18,6 +18,8 @@ type JobPayload = {
   address?: string;
   postcode?: string;
   rootJobId?: string;
+  parentJobId?: string;
+  requestSource?: string;
 };
 
 const BEE_KEY = process.env.SCRAPINGBEE_API_KEY || "";
@@ -574,8 +576,17 @@ Return strict JSON with both decision certainty and ownership likelihood:
 }
 
 export default new Worker("site-fetch", async job => {
-  const { host, companyNumber, companyName, address, postcode } = job.data as JobPayload;
-  await startJob({ jobId: job.id as string, queue: 'site-fetch', name: job.name, payload: job.data });
+  const { host, companyNumber, companyName, address, postcode, rootJobId, parentJobId, requestSource } = job.data as JobPayload;
+  const resolvedRoot = rootJobId || (job.id as string);
+  await startJob({
+    jobId: job.id as string,
+    queue: 'site-fetch',
+    name: job.name,
+    payload: job.data,
+    rootJobId: resolvedRoot,
+    parentJobId: parentJobId || null,
+    requestSource: requestSource || 'site-fetch',
+  });
   try {
     if (companyNumber) {
       await query(
@@ -995,7 +1006,7 @@ export default new Worker("site-fetch", async job => {
       if (root && absolute) {
         const { rows: pend } = await query<{ job_id: string }>(
           `SELECT job_id FROM job_progress
-             WHERE queue = 'site-fetch' AND status = 'pending' AND data->>'rootJobId' = $1 AND job_id <> $2`,
+            WHERE queue = 'site-fetch' AND status = 'pending' AND COALESCE(root_job_id, data->>'rootJobId') = $1 AND job_id <> $2`,
           [root, job.id as string]
         );
         let cancelled = 0;
@@ -1021,7 +1032,7 @@ export default new Worker("site-fetch", async job => {
       website_validations,
       linkedins: Array.from(new Set([...foundCompanyLIs, ...foundPersonalLIs])),
       trading_name: tradingName || null,
-      rootJobId: (job.data as any)?.rootJobId || null
+      rootJobId: resolvedRoot
     });
     try { await logEvent(job.id as string, 'info', 'Usage summary', { scrapingbee_calls: beeCalls }); } catch {}
 
@@ -1089,7 +1100,7 @@ export default new Worker("site-fetch", async job => {
         linkedins_persisted: persistLIs
       });
       if (tradingName) {
-        const root = (job.data as any)?.rootJobId || null;
+        const root = resolvedRoot;
         if (root) {
           try {
             const { rows: rootRows } = await query<{ data: any }>(
@@ -1136,7 +1147,7 @@ export default new Worker("site-fetch", async job => {
 
     // After this job is marked completed, decide whether to kick off person-linkedin
     try {
-      const root = (job.data as any)?.rootJobId || null;
+      const root = resolvedRoot;
       if (root) {
         // If we have a workflow root, only continue once ALL company-discovery and site-fetch jobs for the root are finished
         const { rows: progRows } = await query<{ data: any }>(
@@ -1152,7 +1163,7 @@ export default new Worker("site-fetch", async job => {
              FROM job_progress
             WHERE status IN ('pending','running')
               AND (queue = 'company-discovery' OR queue = 'site-fetch')
-              AND data->>'rootJobId' = $1`,
+              AND COALESCE(root_job_id, data->>'rootJobId') = $1`,
           [root]
         );
         const runningCount = Number(runningAll?.[0]?.c || 0);
@@ -1165,10 +1176,10 @@ export default new Worker("site-fetch", async job => {
                FROM job_progress
               WHERE queue = 'company-discovery'
                 AND status = 'completed'
-                AND data->>'rootJobId' = $1
+                AND COALESCE(root_job_id, data->>'rootJobId') = $1
                 AND (data->>'companyNumber') = ANY($2::text[])`,
-            [root, expectedCompanies]
-          );
+          [root, expectedCompanies]
+        );
           completedCompanies = Number(compRows?.[0]?.c || 0);
         }
 
@@ -1274,7 +1285,7 @@ export default new Worker("site-fetch", async job => {
               return '';
             })();
 
-            const pjId = `person:${(p as any).id}:${root}`;
+            const pjId = `person:${(p as any).id}:${resolvedRoot}`;
             const payload = {
               person: {
                 firstName: p.first_name || '',
@@ -1292,21 +1303,32 @@ export default new Worker("site-fetch", async job => {
                 companyLinkedIns: aggCompanyLIs,
                 personalLinkedIns: aggPersonalLIs
               },
-              rootJobId: root
+              rootJobId: resolvedRoot,
+              parentJobId: job.id as string,
+              requestSource: requestSource || 'site-fetch'
             };
             try {
               await query(
-                `INSERT INTO job_progress(job_id, queue, name, status, data)
-                 VALUES ($1,'person-linkedin','discover','pending',$2)
+                `INSERT INTO job_progress(job_id, queue, name, status, data, root_job_id, parent_job_id, request_source)
+                 VALUES ($1,'person-linkedin','discover','pending',$2,$3,$4,$5)
                  ON CONFLICT (job_id)
-                 DO UPDATE SET status='pending', data=$2, updated_at=now()`,
-                [pjId, JSON.stringify(payload)]
+                 DO UPDATE SET status='pending',
+                               data=$2,
+                               root_job_id=$3,
+                               parent_job_id=$4,
+                               request_source=$5,
+                               updated_at=now()`,
+                [pjId, JSON.stringify(payload), resolvedRoot, job.id as string, requestSource || 'site-fetch']
               );
             } catch {}
-            await personQ.add('discover', payload, { jobId: pjId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
+            await personQ.add('discover', payload, {
+              jobId: pjId,
+              attempts: 5,
+              backoff: { type: 'exponential', delay: 2000 },
+            });
             enqueued++;
           }
-          await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after ALL discovery complete', { scope: 'summary', rootJobId: root, people: people.length, enqueued });
+          await logEvent(job.id as string, 'info', 'Enqueued person-linkedin searches after ALL discovery complete', { scope: 'summary', rootJobId: resolvedRoot, people: people.length, enqueued });
         }
       } else {
         // Backward-compatible behavior: if no workflow root, fallback to per-company aggregation
@@ -1419,27 +1441,45 @@ export default new Worker("site-fetch", async job => {
             const fullName = [p.first_name, p.middle_names, p.last_name].filter(Boolean).join(' ');
             if (!fullName.trim()) continue;
             const jobId = `person:${p.id}:${companyNumber}`;
+            const payload = {
+              person: {
+                firstName: p.first_name || '',
+                middleNames: p.middle_names || '',
+                lastName: p.last_name || '',
+                dob: p.dob_string || '',
+              },
+              context: {
+                companyNumber,
+                companyName: companyNameForContext,
+                tradingNames: allTradingNames,
+                activeTradingNames,
+                registeredNames: allRegisteredNames,
+                activeRegisteredNames,
+                websites: aggWebsites,
+                companyLinkedIns: aggCompanyLIs,
+                personalLinkedIns: aggPersonalLIs,
+              },
+              rootJobId: resolvedRoot,
+              parentJobId: job.id as string,
+              requestSource: requestSource || 'site-fetch',
+            };
+            try {
+              await query(
+                `INSERT INTO job_progress(job_id, queue, name, status, data, root_job_id, parent_job_id, request_source)
+                 VALUES ($1,'person-linkedin','discover','pending',$2,$3,$4,$5)
+                 ON CONFLICT (job_id)
+                 DO UPDATE SET status='pending',
+                               data=$2,
+                               root_job_id=$3,
+                               parent_job_id=$4,
+                               request_source=$5,
+                               updated_at=now()`,
+                [jobId, JSON.stringify(payload), resolvedRoot, job.id as string, requestSource || 'site-fetch']
+              );
+            } catch {}
             await personQ.add(
               'discover',
-              {
-                person: {
-                  firstName: p.first_name || '',
-                  middleNames: p.middle_names || '',
-                  lastName: p.last_name || '',
-                  dob: p.dob_string || ''
-                },
-                context: {
-                  companyNumber,
-                  companyName: companyNameForContext,
-                  tradingNames: allTradingNames,
-                  activeTradingNames,
-                  registeredNames: allRegisteredNames,
-                  activeRegisteredNames,
-                  websites: aggWebsites,
-                  companyLinkedIns: aggCompanyLIs,
-                  personalLinkedIns: aggPersonalLIs
-                }
-              },
+              payload,
               { jobId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } }
             );
             enqueued++;
