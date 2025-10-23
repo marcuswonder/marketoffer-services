@@ -6,6 +6,7 @@ import { AddressInput, prettyAddress, normalizePostcode, addressVariants } from 
 
 export type OccupantCompanyRelation = {
   role: 'director' | 'psc';
+  companyId?: number;
   companyNumber?: string;
   companyName?: string;
   officerId?: string | null;

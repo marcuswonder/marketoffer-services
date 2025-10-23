@@ -70,6 +70,7 @@ function dedupeStrings(values: any[]): string[] {
 }
 
 type CompanyDetail = {
+  companyId?: number | null;
   name?: string;
   number?: string;
   status?: string;
@@ -325,12 +326,14 @@ export default new Worker("person-linkedin", async job => {
       const postcode = (app?.registeredPostcode || app?.registered_postcode || '').toString().trim();
       const address = (app?.registeredAddress || app?.registered_address || '').toString().trim();
       const role = (app?.role || app?.appointmentRole || app?.appointment_role || '').toString().trim();
+      const companyId = typeof app?.companyId === 'number' ? app.companyId : null;
       const sicCodesRaw = Array.isArray(app?.sic_codes) ? app.sic_codes : Array.isArray(app?.sicCodes) ? app.sicCodes : [];
       const sicCodes = sicCodesRaw
         .map((code: any) => (code == null ? '' : String(code).trim()))
         .filter(Boolean);
-      if (!name && !number && !address && !postcode && !status && !role && !sicCodes.length) return null;
+      if (!name && !number && !address && !postcode && !status && !role && !sicCodes.length && companyId == null) return null;
       return {
+        companyId,
         name: name || undefined,
         number: number || undefined,
         status: status || undefined,
@@ -755,6 +758,47 @@ export default new Worker("person-linkedin", async job => {
               [addPersonalUrls, addPersonalVerif, job.id as string, targetPersonId]
             );
             await logEvent(job.id as string, 'info', 'Persisted LinkedIns to ch_people', { person_id: targetPersonId, personal_total: personalUrlMap.size });
+
+            const canonicalLinkedIns = Array.from(new Set([
+              ...personalUrlMap.keys(),
+              ...companyUrlMap.keys()
+            ]));
+            if (canonicalLinkedIns.length) {
+              for (const detail of companyDetails) {
+                let canonicalTargetId = typeof detail.companyId === 'number' ? detail.companyId : null;
+                if (!canonicalTargetId && detail.number) {
+                  const { rows: canonicalRows } = await query<{ id: number }>(
+                    `SELECT id FROM ch_companies WHERE company_number = $1 LIMIT 1`,
+                    [detail.number]
+                  );
+                  canonicalTargetId = canonicalRows[0]?.id || null;
+                }
+                if (!canonicalTargetId) continue;
+                await query(
+                  `UPDATE ch_companies
+                      SET discovered_linkedins = (
+                            SELECT jsonb_agg(DISTINCT value)
+                              FROM jsonb_array_elements(
+                                COALESCE(discovered_linkedins, '[]'::jsonb) || $2::jsonb
+                              ) AS t(value)
+                          ),
+                          discovery_status = CASE
+                            WHEN COALESCE(discovery_status, 'pending') IN ('pending','queued','running') THEN 'completed'
+                            ELSE discovery_status
+                          END,
+                          discovery_job_id = COALESCE(discovery_job_id, $3),
+                          discovery_error = NULL,
+                          last_discovered_at = now(),
+                          updated_at = now()
+                    WHERE id = $1`,
+                  [
+                    canonicalTargetId,
+                    JSON.stringify(canonicalLinkedIns),
+                    job.id as string,
+                  ]
+                );
+              }
+            }
             await logEvent(job.id as string, 'info', 'Persisted LinkedIns to ch_appointments', { person_id: targetPersonId, personal_added: acceptedPersonal.length, company_added: acceptedCompany.length, threshold: PERSON_LI_ACCEPT_THRESHOLD });
             if (rootJobId) {
               try { await logEvent(rootJobId, 'info', 'Person LI: persisted LinkedIns', { childJobId: job.id, person_id: targetPersonId, personal_added: acceptedPersonal.length, company_added: acceptedCompany.length }); } catch {}

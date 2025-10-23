@@ -346,6 +346,7 @@ function scoreAddressMatch(target: AddressInput, candidate: any): AddressMatchDe
 }
 
 export type CompanyAddressHit = {
+  companyId?: number | null;
   companyNumber: string;
   companyName: string;
   status?: string;
@@ -651,6 +652,7 @@ export function summarizeOfficer(hit: OfficerAddressHit) {
 
 export function summarizeCompany(hit: CompanyAddressHit) {
   return {
+    companyId: hit.companyId ?? null,
     companyNumber: hit.companyNumber,
     companyName: hit.companyName,
     status: hit.status,

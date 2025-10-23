@@ -936,6 +936,7 @@ function occupantFromCompanyPerson(
   const relations: OccupantCompanyRelation[] = [];
   const baseRelation: OccupantCompanyRelation = {
     role: opts.source,
+    companyId: typeof (opts.company as any).companyId === 'number' ? (opts.company as any).companyId : undefined,
     companyNumber: opts.company.companyNumber || undefined,
     companyName: opts.company.companyName || undefined,
     officerId: opts.officer?.officerId || null,
@@ -1249,6 +1250,33 @@ export default new Worker<OwnerDiscoveryJob>(
       const matchedCompanies = companyHits
         .filter((hit) => hit.matched && hit.matchConfidence >= 0.7 && !!hit.companyNumber)
         .sort((a, b) => b.matchConfidence - a.matchConfidence)
+
+      if (matchedCompanies.length) {
+        const companyNumbersForCanonical = matchedCompanies
+          .map((hit) => hit.companyNumber)
+          .filter((num): num is string => typeof num === 'string' && num.trim().length > 0);
+        if (companyNumbersForCanonical.length) {
+          try {
+            const { rows: canonicalRows } = await query<{ id: number; company_number: string }>(
+              `SELECT id, company_number FROM ch_companies WHERE company_number = ANY($1::text[])`,
+              [companyNumbersForCanonical]
+            );
+            const canonicalMap = new Map<string, number>();
+            for (const row of canonicalRows) {
+              canonicalMap.set(row.company_number, row.id);
+            }
+            for (const hit of matchedCompanies) {
+              if (hit.companyNumber && canonicalMap.has(hit.companyNumber)) {
+                (hit as any).companyId = canonicalMap.get(hit.companyNumber) || null;
+              }
+            }
+          } catch (err) {
+            await logEvent(jobId, 'debug', 'Failed to load canonical company ids for matched companies', {
+              error: String(err),
+            });
+          }
+        }
+      }
 
       await logEvent(jobId, 'info', 'CH Companies Matched by address search', {
         count: matchedCompanies.length,

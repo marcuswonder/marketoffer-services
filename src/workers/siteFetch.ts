@@ -20,6 +20,7 @@ type JobPayload = {
   rootJobId?: string;
   parentJobId?: string;
   requestSource?: string;
+  companyId?: number;
 };
 
 const BEE_KEY = process.env.SCRAPINGBEE_API_KEY || "";
@@ -576,7 +577,7 @@ Return strict JSON with both decision certainty and ownership likelihood:
 }
 
 export default new Worker("site-fetch", async job => {
-  const { host, companyNumber, companyName, address, postcode, rootJobId, parentJobId, requestSource } = job.data as JobPayload;
+  const { host, companyNumber, companyName, address, postcode, rootJobId, parentJobId, requestSource, companyId } = job.data as JobPayload;
   const resolvedRoot = rootJobId || (job.id as string);
   await startJob({
     jobId: job.id as string,
@@ -1032,7 +1033,8 @@ export default new Worker("site-fetch", async job => {
       website_validations,
       linkedins: Array.from(new Set([...foundCompanyLIs, ...foundPersonalLIs])),
       trading_name: tradingName || null,
-      rootJobId: resolvedRoot
+      rootJobId: resolvedRoot,
+      companyId: companyId || null,
     });
     try { await logEvent(job.id as string, 'info', 'Usage summary', { scrapingbee_calls: beeCalls }); } catch {}
 
@@ -1099,6 +1101,50 @@ export default new Worker("site-fetch", async job => {
         personal_linkedins_added: persistLIs ? Array.from(foundPersonalLIs).length : 0,
         linkedins_persisted: persistLIs
       });
+      const canonicalLinkedIns = Array.from(new Set([...foundCompanyLIs, ...foundPersonalLIs]));
+      const canonicalWebsitesJson = validated_websites.length ? JSON.stringify(validated_websites) : null;
+      const canonicalLinkedInsJson = canonicalLinkedIns.length ? JSON.stringify(canonicalLinkedIns) : null;
+      if (canonicalWebsitesJson || canonicalLinkedInsJson || companyId) {
+        let canonicalTargetId = companyId || null;
+        if (!canonicalTargetId && companyNumber) {
+          const { rows: canonicalRows } = await query<{ id: number }>(
+            `SELECT id FROM ch_companies WHERE company_number = $1 LIMIT 1`,
+            [companyNumber]
+          );
+          canonicalTargetId = canonicalRows[0]?.id || null;
+        }
+        if (canonicalTargetId) {
+          await query(
+            `UPDATE ch_companies
+                SET discovered_websites = CASE
+                      WHEN $2::jsonb IS NULL THEN discovered_websites
+                      ELSE (
+                        SELECT jsonb_agg(DISTINCT value)
+                          FROM jsonb_array_elements(COALESCE(discovered_websites, '[]'::jsonb) || $2::jsonb) AS t(value)
+                      )
+                    END,
+                    discovered_linkedins = CASE
+                      WHEN $3::jsonb IS NULL THEN discovered_linkedins
+                      ELSE (
+                        SELECT jsonb_agg(DISTINCT value)
+                          FROM jsonb_array_elements(COALESCE(discovered_linkedins, '[]'::jsonb) || $3::jsonb) AS t(value)
+                      )
+                    END,
+                    discovery_status = 'completed',
+                    discovery_job_id = COALESCE(discovery_job_id, $4),
+                    discovery_error = NULL,
+                    last_discovered_at = now(),
+                    updated_at = now()
+              WHERE id = $1`,
+            [
+              canonicalTargetId,
+              canonicalWebsitesJson,
+              canonicalLinkedInsJson,
+              job.id as string,
+            ]
+          );
+        }
+      }
       if (tradingName) {
         const root = resolvedRoot;
         if (root) {

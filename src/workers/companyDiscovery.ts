@@ -54,9 +54,78 @@ function asArray<T = any>(val: any): T[] {
   return [] as T[];
 }
 
+type CanonicalCompanyRecord = {
+  id: number;
+  company_number: string;
+  name: string | null;
+  status: string | null;
+  registered_address: string | null;
+  registered_postcode: string | null;
+  sic_codes: string[] | null;
+  discovery_status: string | null;
+  discovery_job_id: string | null;
+};
+
+async function ensureCanonicalCompany(input: {
+  companyId?: number | null;
+  companyNumber?: string | null;
+  companyName?: string | null;
+  companyStatus?: string | null;
+  registeredAddress?: string | null;
+  registeredPostcode?: string | null;
+  sicCodes?: string[] | null;
+}): Promise<CanonicalCompanyRecord> {
+  const cleanedNumber = (input.companyNumber || '').trim();
+  if (input.companyId) {
+    const { rows } = await query<CanonicalCompanyRecord>(
+      `SELECT id, company_number, name, status, registered_address, registered_postcode, sic_codes, discovery_status, discovery_job_id
+         FROM ch_companies WHERE id = $1 LIMIT 1`,
+      [input.companyId]
+    );
+    if (rows[0]) return rows[0];
+  }
+  if (cleanedNumber) {
+    const { rows } = await query<CanonicalCompanyRecord>(
+      `SELECT id, company_number, name, status, registered_address, registered_postcode, sic_codes, discovery_status, discovery_job_id
+         FROM ch_companies WHERE company_number = $1 LIMIT 1`,
+      [cleanedNumber]
+    );
+    if (rows[0]) return rows[0];
+  }
+
+  const numberToInsert = cleanedNumber || `unknown:${Date.now()}`;
+  const { rows } = await query<CanonicalCompanyRecord>(
+    `INSERT INTO ch_companies (company_number, name, status, registered_address, registered_postcode, sic_codes)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (company_number)
+     DO UPDATE SET
+       name = COALESCE(EXCLUDED.name, ch_companies.name),
+       status = COALESCE(EXCLUDED.status, ch_companies.status),
+       registered_address = COALESCE(EXCLUDED.registered_address, ch_companies.registered_address),
+       registered_postcode = COALESCE(EXCLUDED.registered_postcode, ch_companies.registered_postcode),
+       sic_codes = CASE
+         WHEN EXCLUDED.sic_codes IS NOT NULL AND CARDINALITY(EXCLUDED.sic_codes) > 0
+           THEN EXCLUDED.sic_codes
+         ELSE ch_companies.sic_codes
+       END,
+       updated_at = now()
+     RETURNING id, company_number, name, status, registered_address, registered_postcode, sic_codes, discovery_status, discovery_job_id`,
+    [
+      numberToInsert,
+      input.companyName || null,
+      input.companyStatus || null,
+      input.registeredAddress || null,
+      input.registeredPostcode || null,
+      input.sicCodes && input.sicCodes.length ? input.sicCodes : null,
+    ]
+  );
+  return rows[0];
+}
+
 await initDb();
 export default new Worker("company-discovery", async job => {
-  const {
+  const data = job.data as any;
+  let {
     companyNumber,
     companyName,
     address,
@@ -66,8 +135,11 @@ export default new Worker("company-discovery", async job => {
     requestSource,
     ownerJobId,
     chJobId,
-  } = job.data as any;
+    companyId: incomingCompanyId,
+  } = data;
   const resolvedRoot = rootJobId || ownerJobId || chJobId || (job.id as string);
+  let canonicalCompanyId: number | null = null;
+  let metadataPayload: Record<string, any> = {};
   await startJob({
     jobId: job.id as string,
     queue: 'company-discovery',
@@ -78,6 +150,81 @@ export default new Worker("company-discovery", async job => {
     requestSource: requestSource || 'company-discovery',
   });
   try {
+    const canonical = await ensureCanonicalCompany({
+      companyId: incomingCompanyId,
+      companyNumber,
+      companyName,
+      companyStatus: null,
+      registeredAddress: address,
+      registeredPostcode: postcode,
+    });
+    canonicalCompanyId = canonical.id;
+    companyNumber = canonical.company_number;
+    companyName = canonical.name || companyName;
+    address = canonical.registered_address || address;
+    postcode = canonical.registered_postcode || postcode;
+
+    if (canonical.discovery_status === 'running' && canonical.discovery_job_id && canonical.discovery_job_id !== job.id) {
+      await logEvent(job.id as string, 'info', 'Company discovery already in progress', {
+        companyId: canonicalCompanyId,
+        companyNumber,
+        discoveryStatus: canonical.discovery_status,
+        discoveryJobId: canonical.discovery_job_id,
+      });
+      await completeJob(job.id as string, {
+        companyId: canonicalCompanyId,
+        companyNumber,
+        companyName,
+        skipped: true,
+        reason: 'already_running',
+        activeJobId: canonical.discovery_job_id,
+      });
+      return;
+    }
+
+    if (canonical.discovery_status === 'queued' && canonical.discovery_job_id && canonical.discovery_job_id !== job.id) {
+      await logEvent(job.id as string, 'info', 'Company discovery already queued by another job', {
+        companyId: canonicalCompanyId,
+        companyNumber,
+        discoveryStatus: canonical.discovery_status,
+        discoveryJobId: canonical.discovery_job_id,
+      });
+      await completeJob(job.id as string, {
+        companyId: canonicalCompanyId,
+        companyNumber,
+        companyName,
+        skipped: true,
+        reason: 'already_queued',
+        activeJobId: canonical.discovery_job_id,
+      });
+      return;
+    }
+
+    if (canonical.discovery_status === 'completed' && (requestSource || '').toLowerCase() !== 'manual') {
+      await logEvent(job.id as string, 'info', 'Skipping discovery (already completed)', {
+        companyId: canonicalCompanyId,
+        companyNumber,
+      });
+      await completeJob(job.id as string, {
+        companyId: canonicalCompanyId,
+        companyNumber,
+        companyName,
+        skipped: true,
+        reason: 'already_completed',
+      });
+      return;
+    }
+
+    await query(
+      `UPDATE ch_companies
+          SET discovery_status = 'running',
+              discovery_job_id = $2,
+              discovery_error = NULL,
+              updated_at = now()
+        WHERE id = $1`,
+      [canonicalCompanyId, job.id as string]
+    );
+
     const cleaned = cleanCompanyName(companyName || "");
     // Gather SIC codes and director names from our DB if available
     const sicRows = await query<{ sic: string }>(
@@ -147,6 +294,12 @@ export default new Worker("company-discovery", async job => {
       if (safeCleanName) append(`${safeCleanName} ${kp} UK`);
     }
     await logEvent(job.id as string, 'info', 'Built queries', { queries, sicCodes, keyPhrases, directorNames });
+    metadataPayload = {
+      queries,
+      sicCodes,
+      keyPhrases,
+      directorNames,
+    };
 
     const hosts = new Set<string>();
     const genericList = Array.from(genericHosts);
@@ -331,7 +484,9 @@ Return strict JSON with both decision certainty and ownership likelihood:
 
     let enqueued = 0;
     for (const host of potentials) {
-      const jobId = `site:${resolvedRoot}:${host}`;
+      const jobId = canonicalCompanyId
+        ? `site:company:${canonicalCompanyId}:${host}`
+        : `site:${resolvedRoot}:${host}`;
       const payload = {
         host,
         companyNumber,
@@ -341,6 +496,7 @@ Return strict JSON with both decision certainty and ownership likelihood:
         rootJobId: resolvedRoot,
         parentJobId: job.id as string,
         requestSource: requestSource || 'company-discovery',
+        companyId: canonicalCompanyId,
       };
       // Mark as pending in job_progress so the workflow finalizer can wait on both pending and running
       try {
@@ -382,7 +538,9 @@ Return strict JSON with both decision certainty and ownership likelihood:
       }
       enqueued++;
     }
+    metadataPayload = { ...metadataPayload, enqueuedHosts: potentials };
     await logEvent(job.id as string, 'info', 'Enqueued site-fetch jobs', { scope: 'summary', enqueued, hosts: potentials });
+    metadataPayload = { ...metadataPayload, serperCalls };
     try { await logEvent(job.id as string, 'info', 'Usage summary', { serper_calls: serperCalls }); } catch {}
 
     // If this workflow uses a rootJobId, and if all discovery work is finished (no running company-discovery or site-fetch),
@@ -510,10 +668,61 @@ Return strict JSON with both decision certainty and ownership likelihood:
     }
 
     // site-fetch worker will persist results and enqueue person-linkedin after aggregation
-    await completeJob(job.id as string, { companyNumber, companyName, candidates: potentials.length, enqueuedSiteFetch: enqueued, rootJobId: resolvedRoot });
-    logger.info({ companyNumber, candidates: potentials.length, enqueuedSiteFetch: enqueued }, 'Company discovery dispatched to site-fetch');
+    const finalStatus = enqueued === 0 ? 'completed' : 'running';
+    const metadataJson = metadataPayload && Object.keys(metadataPayload).length ? JSON.stringify(metadataPayload) : null;
+    if (canonicalCompanyId) {
+      await query(
+        `UPDATE ch_companies
+            SET name = COALESCE($2, name),
+                registered_address = COALESCE($3, registered_address),
+                registered_postcode = COALESCE($4, registered_postcode),
+                sic_codes = CASE WHEN $5::text[] IS NOT NULL AND CARDINALITY($5::text[]) > 0 THEN $5::text[] ELSE sic_codes END,
+                metadata = CASE WHEN $6::jsonb IS NOT NULL THEN COALESCE(metadata, '{}'::jsonb) || $6::jsonb ELSE metadata END,
+                discovery_status = $7,
+                discovery_job_id = $8,
+                discovery_error = NULL,
+                first_discovered_at = CASE WHEN first_discovered_at IS NULL AND $7 = 'completed' THEN now() ELSE first_discovered_at END,
+                last_discovered_at = CASE WHEN $7 = 'completed' THEN now() ELSE last_discovered_at END,
+                updated_at = now()
+          WHERE id = $1`,
+        [
+          canonicalCompanyId,
+          companyName || null,
+          address || null,
+          postcode || null,
+          sicCodes.length ? sicCodes : null,
+          metadataJson,
+          finalStatus,
+          job.id as string,
+        ]
+      );
+    }
+
+    await completeJob(job.id as string, {
+      companyId: canonicalCompanyId,
+      companyNumber,
+      companyName,
+      candidates: potentials.length,
+      enqueuedSiteFetch: enqueued,
+      rootJobId: resolvedRoot,
+      discoveryStatus: finalStatus,
+    });
+    logger.info({ companyId: canonicalCompanyId, companyNumber, candidates: potentials.length, enqueuedSiteFetch: enqueued }, 'Company discovery dispatched to site-fetch');
     return;
   } catch (err) {
+    if (canonicalCompanyId) {
+      try {
+        await query(
+          `UPDATE ch_companies
+              SET discovery_status = 'failed',
+                  discovery_error = $2,
+                  discovery_job_id = $3,
+                  updated_at = now()
+            WHERE id = $1`,
+          [canonicalCompanyId, String(err), job.id as string]
+        );
+      } catch {}
+    }
     await failJob(job.id as string, err);
     logger.error({ companyNumber, err: String(err) }, "Company discovery failed");
     throw err;

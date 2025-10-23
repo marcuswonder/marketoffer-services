@@ -52,6 +52,26 @@ export async function initDb() {
         CREATE INDEX IF NOT EXISTS job_events_job_id_idx ON job_events(job_id);
 
         -- Store enriched CH people and their appointments for downstream processing
+        CREATE TABLE IF NOT EXISTS ch_companies (
+          id BIGSERIAL PRIMARY KEY,
+          company_number TEXT NOT NULL UNIQUE,
+          name TEXT,
+          registered_address TEXT,
+          registered_postcode TEXT,
+          status TEXT,
+          sic_codes TEXT[],
+          discovery_status TEXT NOT NULL DEFAULT 'pending',
+          discovery_job_id TEXT,
+          discovery_error TEXT,
+          discovered_websites JSONB,
+          discovered_linkedins JSONB,
+          metadata JSONB,
+          first_discovered_at TIMESTAMPTZ,
+          last_discovered_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
         CREATE TABLE IF NOT EXISTS ch_people (
           id BIGSERIAL PRIMARY KEY,
           job_id TEXT NOT NULL,
@@ -77,6 +97,8 @@ export async function initDb() {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           UNIQUE(job_id, person_key)
         );
+
+        CREATE INDEX IF NOT EXISTS ch_companies_number_idx ON ch_companies(company_number);
 
         CREATE TABLE IF NOT EXISTS ch_appointments (
           id BIGSERIAL PRIMARY KEY,
@@ -109,6 +131,21 @@ export async function initDb() {
         CREATE INDEX IF NOT EXISTS job_progress_root_idx ON job_progress(root_job_id);
         CREATE INDEX IF NOT EXISTS job_progress_parent_idx ON job_progress(parent_job_id);
         CREATE INDEX IF NOT EXISTS job_events_root_idx ON job_events(root_job_id);
+
+        ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS company_id BIGINT REFERENCES ch_companies(id);
+        CREATE INDEX IF NOT EXISTS ch_appointments_company_id_idx ON ch_appointments(company_id);
+
+        CREATE TABLE IF NOT EXISTS ch_company_people (
+          company_id BIGINT NOT NULL REFERENCES ch_companies(id) ON DELETE CASCADE,
+          person_id BIGINT NOT NULL REFERENCES ch_people(id) ON DELETE CASCADE,
+          roles TEXT[] DEFAULT '{}'::text[],
+          first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY(company_id, person_id)
+        );
+        CREATE INDEX IF NOT EXISTS ch_company_people_person_idx ON ch_company_people(person_id);
 
         ALTER TABLE ch_people ADD COLUMN IF NOT EXISTS nationality TEXT;
         ALTER TABLE ch_appointments ADD COLUMN IF NOT EXISTS company_status TEXT;
@@ -192,6 +229,15 @@ export async function initDb() {
           row_count INTEGER
         );
 
+        ALTER TABLE ch_companies ADD COLUMN IF NOT EXISTS discovery_status TEXT NOT NULL DEFAULT 'pending';
+        ALTER TABLE ch_companies ADD COLUMN IF NOT EXISTS discovery_job_id TEXT;
+        ALTER TABLE ch_companies ADD COLUMN IF NOT EXISTS discovery_error TEXT;
+        ALTER TABLE ch_companies ADD COLUMN IF NOT EXISTS discovered_websites JSONB;
+        ALTER TABLE ch_companies ADD COLUMN IF NOT EXISTS discovered_linkedins JSONB;
+        ALTER TABLE ch_companies ADD COLUMN IF NOT EXISTS metadata JSONB;
+        ALTER TABLE ch_companies ADD COLUMN IF NOT EXISTS first_discovered_at TIMESTAMPTZ;
+        ALTER TABLE ch_companies ADD COLUMN IF NOT EXISTS last_discovered_at TIMESTAMPTZ;
+
         ALTER TABLE owner_candidates ADD COLUMN IF NOT EXISTS normalized_full_name TEXT;
         ALTER TABLE owner_candidates ADD COLUMN IF NOT EXISTS company_numbers TEXT[];
         ALTER TABLE owner_candidates ADD COLUMN IF NOT EXISTS officer_ids TEXT[];
@@ -204,6 +250,49 @@ export async function initDb() {
         ALTER TABLE land_registry_corporate_meta ADD COLUMN IF NOT EXISTS row_count INTEGER;
         UPDATE land_registry_corporate_meta SET dataset_label = COALESCE(dataset_label, 'legacy');
         CREATE UNIQUE INDEX IF NOT EXISTS land_registry_corporate_meta_label_idx ON land_registry_corporate_meta(dataset_label);
+
+        -- Backfill canonical company table and link appointments
+        INSERT INTO ch_companies (company_number, name, status, registered_address, registered_postcode, sic_codes)
+        SELECT DISTINCT
+          COALESCE(NULLIF(TRIM(a.company_number), ''), CONCAT('unknown:', a.id)) AS company_number,
+          NULLIF(TRIM(a.company_name), '') AS name,
+          NULLIF(TRIM(a.company_status), '') AS status,
+          NULLIF(TRIM(a.registered_address), '') AS registered_address,
+          NULLIF(TRIM(a.registered_postcode), '') AS registered_postcode,
+          CASE WHEN a.sic_codes IS NOT NULL AND CARDINALITY(a.sic_codes) > 0 THEN a.sic_codes ELSE NULL END AS sic_codes
+        FROM ch_appointments a
+        WHERE COALESCE(TRIM(a.company_number), '') <> ''
+        ON CONFLICT (company_number)
+        DO UPDATE SET
+          name = COALESCE(EXCLUDED.name, ch_companies.name),
+          status = COALESCE(EXCLUDED.status, ch_companies.status),
+          registered_address = COALESCE(EXCLUDED.registered_address, ch_companies.registered_address),
+          registered_postcode = COALESCE(EXCLUDED.registered_postcode, ch_companies.registered_postcode),
+          sic_codes = CASE
+            WHEN EXCLUDED.sic_codes IS NOT NULL AND CARDINALITY(EXCLUDED.sic_codes) > 0 THEN EXCLUDED.sic_codes
+            ELSE ch_companies.sic_codes
+          END,
+          updated_at = now();
+
+        UPDATE ch_appointments a
+        SET company_id = c.id
+        FROM ch_companies c
+        WHERE c.company_number = a.company_number
+          AND a.company_id IS DISTINCT FROM c.id;
+
+        INSERT INTO ch_company_people (company_id, person_id, roles)
+        SELECT DISTINCT
+          c.id,
+          a.person_id,
+          ARRAY['officer']::text[]
+        FROM ch_appointments a
+        JOIN ch_companies c ON c.company_number = a.company_number
+        WHERE a.person_id IS NOT NULL
+        ON CONFLICT (company_id, person_id)
+        DO UPDATE SET
+          roles = ARRAY(SELECT DISTINCT UNNEST(COALESCE(ch_company_people.roles,'{}') || EXCLUDED.roles)),
+          last_seen_at = now(),
+          updated_at = now();
       `);
     } finally {
       await query('SELECT pg_advisory_unlock($1)', [LOCK_KEY]);

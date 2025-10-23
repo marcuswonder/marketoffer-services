@@ -28,6 +28,54 @@ function normalizePersonName(name: string): string {
     .trim();
 }
 
+type CompanyUpsertInput = {
+  companyNumber: string;
+  companyName?: string | null;
+  companyStatus?: string | null;
+  registeredAddress?: string | null;
+  registeredPostcode?: string | null;
+  sicCodes?: string[] | null;
+};
+
+async function upsertCompanyRecord(
+  cache: Map<string, { id: number | null; discoveryStatus: string | null }>,
+  input: CompanyUpsertInput
+): Promise<{ id: number | null; discoveryStatus: string | null }> {
+  const companyNumber = (input.companyNumber || '').trim();
+  if (!companyNumber) return { id: null, discoveryStatus: null };
+  const cached = cache.get(companyNumber);
+  if (cached) return cached;
+
+  const { rows } = await query<{ id: number; discovery_status: string | null }>(
+    `INSERT INTO ch_companies (company_number, name, status, registered_address, registered_postcode, sic_codes)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (company_number)
+     DO UPDATE SET
+       name = COALESCE(EXCLUDED.name, ch_companies.name),
+       status = COALESCE(EXCLUDED.status, ch_companies.status),
+       registered_address = COALESCE(EXCLUDED.registered_address, ch_companies.registered_address),
+       registered_postcode = COALESCE(EXCLUDED.registered_postcode, ch_companies.registered_postcode),
+       sic_codes = CASE
+         WHEN EXCLUDED.sic_codes IS NOT NULL AND CARDINALITY(EXCLUDED.sic_codes) > 0
+           THEN EXCLUDED.sic_codes
+         ELSE ch_companies.sic_codes
+       END,
+       updated_at = now()
+     RETURNING id, discovery_status`,
+    [
+      companyNumber,
+      input.companyName || null,
+      input.companyStatus || null,
+      input.registeredAddress || null,
+      input.registeredPostcode || null,
+      input.sicCodes && input.sicCodes.length ? input.sicCodes : null,
+    ]
+  );
+  const record = rows[0] ? { id: rows[0].id, discoveryStatus: rows[0].discovery_status } : { id: null, discoveryStatus: null };
+  cache.set(companyNumber, record);
+  return record;
+}
+
 async function logToJobAndRoot(
   jobId: string,
   rootJobId: string | undefined,
@@ -70,6 +118,7 @@ export default new Worker("ch-appointments", async job => {
     requestSource?: string;
   };
   const pipelineRootId = rootJobId || ownerJobId || (job.id as string);
+  const companyCache = new Map<string, { id: number | null; discoveryStatus: string | null }>();
   // console.log("companyNumber in initDB in workers/chAppointments.ts", companyNumber);
   // console.log("firstName in initDB in workers/chAppointments.ts", firstName);
   // console.log("lastName in initDB in workers/chAppointments.ts", lastName);
@@ -87,6 +136,20 @@ export default new Worker("ch-appointments", async job => {
 
   try {
       const company = await chGetJson<any>(`/company/${companyNumber}`);
+
+      await upsertCompanyRecord(companyCache, {
+        companyNumber,
+        companyName: company?.company_name || null,
+        companyStatus: company?.company_status || null,
+        registeredAddress: company?.registered_office_address
+          ? Object.values(company.registered_office_address)
+              .map((part: unknown) => (part ?? '').toString().trim())
+              .filter(Boolean)
+              .join(', ')
+          : null,
+        registeredPostcode: company?.registered_office_address?.postal_code || null,
+        sicCodes: Array.isArray(company?.sic_codes) ? company.sic_codes : null,
+      });
       // console.log("company in initDB in workers/chAppointments.ts", company);
 
       await logEvent(job.id as string, 'info', 'Fetched company', { companyNumber, company_name: company.company_name, rootJobId: pipelineRootId });
@@ -172,7 +235,7 @@ export default new Worker("ch-appointments", async job => {
     console.log("toProcess in initDB in workers/chAppointments.ts", toProcess);
     
     // Cache for company profiles to avoid duplicate calls
-    const companyCache = new Map<string, any>();
+    const officerCompanyCache = new Map<string, any>();
 
       for (const o of toProcess) {
         if (!o.name) continue;
@@ -197,14 +260,14 @@ export default new Worker("ch-appointments", async job => {
           const coNum = it?.appointed_to?.company_number || "";
           const coName = it?.appointed_to?.company_name || "";
           if (!coNum) continue;
-          let co = companyCache.get(coNum);
+          let co = officerCompanyCache.get(coNum);
           if (!co) {
             try {
               co = await chGetJson<any>(`/company/${coNum}`);
             } catch {
               co = {};
             }
-            companyCache.set(coNum, co);
+            officerCompanyCache.set(coNum, co);
           }
           const address = co?.registered_office_address || {};
           enrichedAppointments.push({
@@ -322,15 +385,15 @@ export default new Worker("ch-appointments", async job => {
               const coNum = it?.appointed_to?.company_number || "";
               const coName = it?.appointed_to?.company_name || "";
               if (!coNum) continue;
-              let co = companyCache.get(coNum);
-              if (!co) {
-                try {
-                  co = await chGetJson<any>(`/company/${coNum}`);
-                } catch {
-                  co = {};
-                }
-                companyCache.set(coNum, co);
-              }
+        let co = officerCompanyCache.get(coNum);
+        if (!co) {
+          try {
+            co = await chGetJson<any>(`/company/${coNum}`);
+          } catch {
+            co = {};
+          }
+          officerCompanyCache.set(coNum, co);
+        }
               const address = co?.registered_office_address || {};
               enrichedAppointments.push({
                 sic_codes: Array.isArray(co?.sic_codes) ? co.sic_codes : [],
@@ -527,10 +590,23 @@ export default new Worker("ch-appointments", async job => {
         if (personId && Array.isArray(e.appointments)) {
           for (const a of e.appointments) {
             totalAppts++;
+            const companyNumberForAppointment = (a?.company_number || '').toString().trim();
+            const sicArray = Array.isArray(a?.sic_codes) ? (a.sic_codes as string[]) : null;
+            const companyRecord = companyNumberForAppointment
+              ? await upsertCompanyRecord(companyCache, {
+                  companyNumber: companyNumberForAppointment,
+                  companyName: (a?.company_name || '').toString(),
+                  companyStatus: (a?.company_status || '').toString(),
+                  registeredAddress: (a?.registered_address || '').toString(),
+                  registeredPostcode: (a?.registered_postcode || '').toString(),
+                  sicCodes: sicArray,
+                })
+              : { id: null, discoveryStatus: null };
+            const companyId = companyRecord.id;
             await query(
               `INSERT INTO ch_appointments(person_id, appointment_id, company_number, company_name, company_status, registered_address, registered_postcode, sic_codes,
-                                           verified_company_website, verified_company_linkedIns, company_website_verification, company_linkedIn_verification)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                                           verified_company_website, verified_company_linkedIns, company_website_verification, company_linkedIn_verification, company_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                ON CONFLICT (person_id, appointment_id)
                DO UPDATE SET company_number=EXCLUDED.company_number,
                              company_name=EXCLUDED.company_name,
@@ -542,22 +618,42 @@ export default new Worker("ch-appointments", async job => {
                              verified_company_linkedIns=EXCLUDED.verified_company_linkedIns,
                              company_website_verification=EXCLUDED.company_website_verification,
                              company_linkedIn_verification=EXCLUDED.company_linkedIn_verification,
+                             company_id = COALESCE(EXCLUDED.company_id, ch_appointments.company_id),
                              updated_at=now()`,
               [
                 personId,
                 a.appointment_id || null,
-                a.company_number || null,
+                companyNumberForAppointment || null,
                 a.company_name || null,
                 a.company_status || null,
                 a.registered_address || null,
                 a.registered_postcode || null,
-                Array.isArray(a.sic_codes) ? a.sic_codes : null,
+                sicArray && sicArray.length ? sicArray : null,
                 JSON.stringify(a.verified_company_website || []),
                 JSON.stringify(a.verified_company_linkedIns || []),
                 JSON.stringify(a.company_website_verification || []),
-                JSON.stringify(a.company_linkedIn_verification || [])
+                JSON.stringify(a.company_linkedIn_verification || []),
+                companyId,
               ]
             );
+            if (companyId) {
+              const roleRaw = (a?.role || a?.company_role || a?.appointment_role || '').toString().trim().toLowerCase();
+              const roleTag = roleRaw || 'officer';
+              await query(
+                `INSERT INTO ch_company_people (company_id, person_id, roles)
+                 VALUES ($1,$2,ARRAY[$3::text])
+                 ON CONFLICT (company_id, person_id)
+                 DO UPDATE SET
+                   roles = ARRAY(
+                     SELECT DISTINCT UNNEST(
+                       COALESCE(ch_company_people.roles,'{}') || ARRAY[$3::text]
+                     )
+                   ),
+                   last_seen_at = now(),
+                   updated_at = now()`,
+                [companyId, personId, roleTag]
+              );
+            }
           }
         }
         if (personId && ownerJobId) {
@@ -630,12 +726,19 @@ export default new Worker("ch-appointments", async job => {
       const slug = slugifyName(fullName);
       const personJobId = `ch-person:${job.id}:${slug}`;
       const appointments = Array.isArray(person?.appointments) ? person.appointments : [];
-      const appointmentSummary = appointments.slice(0, 25).map((appt: any) => ({
-        companyNumber: (appt?.company_number || '').toString(),
-        companyName: (appt?.company_name || '').toString(),
-        companyStatus: (appt?.company_status || '').toString(),
-        registeredPostcode: (appt?.registered_postcode || '').toString(),
-      }));
+      const appointmentSummary = appointments.slice(0, 25).map((appt: any) => {
+        const apptCompanyNumber = (appt?.company_number || '').toString();
+        const cachedCompany = apptCompanyNumber ? companyCache.get(apptCompanyNumber) : undefined;
+        return {
+          companyId: cachedCompany?.id || null,
+          companyNumber: apptCompanyNumber,
+          companyName: (appt?.company_name || '').toString(),
+          companyStatus: (appt?.company_status || '').toString(),
+          registeredAddress: (appt?.registered_address || '').toString(),
+          registeredPostcode: (appt?.registered_postcode || '').toString(),
+          sicCodes: Array.isArray(appt?.sic_codes) ? appt.sic_codes : [],
+        };
+      });
       const payload = {
         person: {
           firstName: (person?.first_name || '').toString(),
@@ -712,7 +815,7 @@ export default new Worker("ch-appointments", async job => {
     }
 
     // Build a unique company list from all appointments and prioritise ACTIVE
-    type CoItem = { company_number: string; company_name: string; company_status: string; registered_address?: string; registered_postcode?: string };
+    type CoItem = { company_id: number | null; company_number: string; company_name: string; company_status: string; registered_address?: string; registered_postcode?: string };
     const coMap = new Map<string, CoItem>();
     for (const e of enriched) {
       const apps: any[] = Array.isArray(e?.appointments) ? e.appointments : [];
@@ -720,7 +823,16 @@ export default new Worker("ch-appointments", async job => {
         const num = (a?.company_number || "").toString();
         if (!num) continue;
         const status = (a?.company_status || "").toString().toLowerCase();
+        const companyRecord = await upsertCompanyRecord(companyCache, {
+          companyNumber: num,
+          companyName: (a?.company_name || '').toString(),
+          companyStatus: (a?.company_status || '').toString(),
+          registeredAddress: (a?.registered_address || '').toString(),
+          registeredPostcode: (a?.registered_postcode || '').toString(),
+          sicCodes: Array.isArray(a?.sic_codes) ? a.sic_codes : null,
+        });
         const item: CoItem = {
+          company_id: companyRecord.id,
           company_number: num,
           company_name: (a?.company_name || "").toString(),
           company_status: status,
@@ -742,7 +854,26 @@ export default new Worker("ch-appointments", async job => {
     // Enqueue discovery jobs: ACTIVE immediately at higher priority, others later with delay
     let enqActive = 0, enqLater = 0;
     for (const c of activeCompanies) {
-      const jobId = `co:${job.id}:${c.company_number}`;
+      const jobId = c.company_id ? `co:${c.company_id}` : `co:${job.id}:${c.company_number}`;
+      const payloadCompanyId = c.company_id || null;
+      let shouldEnqueue = true;
+      if (payloadCompanyId) {
+        const updateResult = await query(
+          `UPDATE ch_companies
+              SET discovery_status = 'queued',
+                  discovery_job_id = $2,
+                  discovery_error = NULL,
+                  updated_at = now()
+           WHERE id = $1
+             AND COALESCE(discovery_status, 'pending') NOT IN ('running','queued','completed')`,
+          [payloadCompanyId, jobId]
+        );
+        const affected = (updateResult as any)?.rowCount ?? 0;
+        if (affected === 0) {
+          shouldEnqueue = false;
+        }
+      }
+      if (!shouldEnqueue) continue;
       await companyQ.add(
         "discover",
         {
@@ -755,6 +886,7 @@ export default new Worker("ch-appointments", async job => {
           chJobId: job.id as string,
           parentJobId: job.id as string,
           ownerJobId: ownerJobId || null,
+          companyId: payloadCompanyId,
         },
         { jobId, priority: 1, attempts: 5, backoff: { type: "exponential", delay: 1500 } }
       );
