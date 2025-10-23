@@ -69,10 +69,23 @@ function dedupeStrings(values: any[]): string[] {
   return out;
 }
 
+type CompanyDetail = {
+  name?: string;
+  number?: string;
+  status?: string;
+  postcode?: string;
+  address?: string;
+  role?: string;
+  sicCodes?: string[];
+};
+
 async function scorePersonalCandidate(opts: {
   fullName: string;
   dob?: string;
   companies: string[];
+  companyNumbers: string[];
+  companyDetails: CompanyDetail[];
+  locations: string[];
   trading: string[];
   websites: string[];
   candidate: { url: string; title?: string; snippet?: string };
@@ -82,6 +95,9 @@ async function scorePersonalCandidate(opts: {
     task: 'score_personal_linkedin',
     person: { name: opts.fullName, dob: opts.dob || '' },
     companies: opts.companies,
+    company_numbers: opts.companyNumbers,
+    company_details: opts.companyDetails,
+    locations: opts.locations,
     trading_names: opts.trading,
     websites: opts.websites,
     candidate: opts.candidate
@@ -197,6 +213,37 @@ type PersonSearchPayload = {
     websites?: string[];
     companyLinkedIns?: string[];
     personalLinkedIns?: string[];
+    appointments?: Array<{
+      companyNumber?: string;
+      companyName?: string;
+      companyStatus?: string;
+      registeredAddress?: string;
+      registeredPostcode?: string;
+      role?: string;
+    }>;
+    propertyAddress?: string;
+    postcode?: string;
+    city?: string;
+    unit?: string;
+    openRegister?: {
+      source?: string | null;
+      address?: string | null;
+      town?: string | null;
+      postcode?: string | null;
+      firstSeenYear?: number | null;
+      lastSeenYear?: number | null;
+    };
+    ownerDiscovery?: {
+      jobId?: string;
+      score?: number | null;
+      rank?: number | null;
+      dataSources?: string[];
+      indicators?: string[];
+      companyNumbers?: string[];
+      companyNames?: string[];
+      latestSaleYear?: number | null;
+      reason?: string | null;
+    };
   };
   rootJobId?: string;
 };
@@ -254,65 +301,120 @@ export default new Worker("person-linkedin", async job => {
     const shortName = [first, last].filter(Boolean).join(' ').trim();
 
     // Build query seeds
-    const websites: string[] = Array.isArray(context?.websites) ? (context!.websites as string[]) : [];
-    const siteHosts = Array.from(new Set(websites.map(w => (w || '').toString().replace(/^https?:\/\//i, '').replace(/\/$/, '')))).filter(Boolean);
-    const hostTradingNames = dedupeStrings(siteHosts.map(h => hostLabel(h)).filter(Boolean));
-    const tradingNamesAll = dedupeStrings([
-      ...(Array.isArray(context?.tradingNames) ? context!.tradingNames as any[] : []),
-      ...hostTradingNames
-    ]);
-    const tradingNamesActive = dedupeStrings(Array.isArray(context?.activeTradingNames) ? context!.activeTradingNames as any[] : []);
-    const registeredNamesAll = dedupeStrings([
-      ...(Array.isArray(context?.registeredNames) ? context!.registeredNames as any[] : []),
-      context?.companyName || ''
-    ]);
-    const registeredNamesActive = dedupeStrings(Array.isArray(context?.activeRegisteredNames) ? context!.activeRegisteredNames as any[] : []);
-    const companyNameCtx: string = (context?.companyName || '').toString().trim();
-    const companyNames = Array.from(new Set([companyNameCtx, ...registeredNamesAll, ...tradingNamesAll])).filter(Boolean);
-    const personalSeeds: string[] = Array.isArray(context?.personalLinkedIns) ? (context!.personalLinkedIns as string[]) : [];
-    const companySeeds: string[] = Array.isArray(context?.companyLinkedIns) ? (context!.companyLinkedIns as string[]) : [];
+  const websites: string[] = Array.isArray(context?.websites) ? (context.websites as string[]) : [];
+  const siteHosts = Array.from(new Set(websites.map(w => (w || '').toString().replace(/^https?:\/\//i, '').replace(/\/$/, '')))).filter(Boolean);
+  const hostTradingNames = dedupeStrings(siteHosts.map(h => hostLabel(h)).filter(Boolean));
+  const tradingNamesAll = dedupeStrings([
+    ...(Array.isArray(context?.tradingNames) ? (context.tradingNames as any[]) : []),
+    ...hostTradingNames
+  ]);
+  const tradingNamesActive = dedupeStrings(Array.isArray(context?.activeTradingNames) ? (context.activeTradingNames as any[]) : []);
+  const registeredNamesAll = dedupeStrings([
+    ...(Array.isArray(context?.registeredNames) ? (context.registeredNames as any[]) : []),
+    context?.companyName || ''
+  ]);
+  const registeredNamesActive = dedupeStrings(Array.isArray(context?.activeRegisteredNames) ? (context.activeRegisteredNames as any[]) : []);
+  const companyNameCtx: string = (context?.companyName || '').toString().trim();
+  const companyNames = Array.from(new Set([companyNameCtx, ...registeredNamesAll, ...tradingNamesAll])).filter(Boolean);
+  const appointmentsRaw = Array.isArray(context?.appointments) ? (context.appointments as any[]) : [];
+  const companyDetails = appointmentsRaw
+    .map((app: any) => {
+      const name = (app?.companyName || app?.company_name || '').toString().trim();
+      const number = (app?.companyNumber || app?.company_number || '').toString().trim();
+      const status = (app?.companyStatus || app?.company_status || '').toString().trim();
+      const postcode = (app?.registeredPostcode || app?.registered_postcode || '').toString().trim();
+      const address = (app?.registeredAddress || app?.registered_address || '').toString().trim();
+      const role = (app?.role || app?.appointmentRole || app?.appointment_role || '').toString().trim();
+      const sicCodesRaw = Array.isArray(app?.sic_codes) ? app.sic_codes : Array.isArray(app?.sicCodes) ? app.sicCodes : [];
+      const sicCodes = sicCodesRaw
+        .map((code: any) => (code == null ? '' : String(code).trim()))
+        .filter(Boolean);
+      if (!name && !number && !address && !postcode && !status && !role && !sicCodes.length) return null;
+      return {
+        name: name || undefined,
+        number: number || undefined,
+        status: status || undefined,
+        postcode: postcode || undefined,
+        address: address || undefined,
+        role: role || undefined,
+        sicCodes: sicCodes.length ? sicCodes : undefined
+      };
+    })
+    .filter(Boolean) as CompanyDetail[];
+  const ownerDiscoveryCtx = context?.ownerDiscovery;
+  const companyNumbers = dedupeStrings([
+    ...(Array.isArray(ownerDiscoveryCtx?.companyNumbers) ? (ownerDiscoveryCtx?.companyNumbers as any[]) : []),
+    ...companyDetails.map(d => d.number || '').filter(Boolean)
+  ]);
+  const locationHintsSet = new Set<string>();
+  const addLocation = (val?: string | null) => {
+    if (val == null) return;
+    const str = val.toString().trim();
+    if (!str) return;
+    locationHintsSet.add(str);
+  };
+  addLocation(context?.propertyAddress);
+  addLocation(context?.city);
+  addLocation(context?.postcode);
+  addLocation(context?.unit);
+  const openRegisterCtx = context?.openRegister;
+  if (openRegisterCtx) {
+    addLocation(openRegisterCtx.address ?? null);
+    addLocation(openRegisterCtx.town ?? null);
+    addLocation(openRegisterCtx.postcode ?? null);
+  }
+  for (const detail of companyDetails) {
+    addLocation(detail.address);
+    addLocation(detail.postcode);
+    const companyName = detail.name;
+    if (companyName) addLocation(companyName);
+  }
+  const locationHints = dedupeStrings(Array.from(locationHintsSet));
+  const personalSeeds: string[] = Array.isArray(context?.personalLinkedIns) ? (context.personalLinkedIns as string[]) : [];
+  const companySeeds: string[] = Array.isArray(context?.companyLinkedIns) ? (context.companyLinkedIns as string[]) : [];
 
-    const personalQueries: string[] = [];
-    const companyQueries: string[] = [];
-    const addPersonalQuery = (base: string, tokens: string[] = []) => {
-      if (!base.trim()) return;
-      const parts = [base.trim(), ...tokens].filter(Boolean);
-      const query = `${parts.join(' ')} UK site:linkedin.com/in`;
-      personalQueries.push(query.replace(/\s+/g, ' ').trim());
-    };
+  const personalQueries: string[] = [];
+  const companyQueries: string[] = [];
+  const addPersonalQuery = (base: string, tokens: string[] = []) => {
+    if (!base.trim()) return;
+    const parts = [base.trim(), ...tokens].filter(Boolean);
+    const query = `${parts.join(' ')} UK site:linkedin.com/in`;
+    personalQueries.push(query.replace(/\s+/g, ' ').trim());
+  };
 
-    const tradingActiveQuoted = tradingNamesActive.map(n => `"${n}"`);
-    const registeredAllQuoted = registeredNamesAll.map(n => `"${n}"`);
-    const tradingActiveLower = new Set(tradingNamesActive.map(n => n.toLowerCase()));
-    const inactiveTradingNames = tradingNamesAll.filter(t => !tradingActiveLower.has(t.toLowerCase()))
-      .map(n => `"${n}"`);
+  const tradingActiveQuoted = tradingNamesActive.map(n => `"${n}"`);
+  const registeredAllQuoted = registeredNamesAll.map(n => `"${n}"`);
+  const tradingActiveLower = new Set(tradingNamesActive.map(n => n.toLowerCase()));
+  const inactiveTradingNames = tradingNamesAll
+    .filter(t => !tradingActiveLower.has(t.toLowerCase()))
+    .map(n => `"${n}"`);
 
-    if (fullName.trim()) {
-      addPersonalQuery(fullName);
-      if (dob) addPersonalQuery(fullName, [dob]);
-      if (tradingNamesActive.length > 1) addPersonalQuery(fullName, tradingActiveQuoted);
-      for (const t of tradingNamesActive) addPersonalQuery(fullName, [`"${t}"`]);
-      for (const t of inactiveTradingNames) addPersonalQuery(fullName, [t]);
-      for (const c of registeredAllQuoted) addPersonalQuery(fullName, [c]);
-      if (companyNames.length) addPersonalQuery(fullName, companyNames.map(c => `"${c}"`));
-    }
-    // Also run searches excluding middle names (first + last only)
-    if (shortName && shortName !== fullName) {
-      addPersonalQuery(shortName);
-      if (dob) addPersonalQuery(shortName, [dob]);
-      if (tradingNamesActive.length > 1) addPersonalQuery(shortName, tradingActiveQuoted);
-      for (const t of tradingNamesActive) addPersonalQuery(shortName, [`"${t}"`]);
-      for (const t of inactiveTradingNames) addPersonalQuery(shortName, [t]);
-      for (const c of registeredAllQuoted) addPersonalQuery(shortName, [c]);
-      if (companyNames.length) addPersonalQuery(shortName, companyNames.map(c => `"${c}"`));
-    }
-    // De-duplicate queries to keep Serper usage efficient
-    const dedupPersonal = Array.from(new Set(personalQueries));
-    personalQueries.length = 0;
-    personalQueries.push(...dedupPersonal);
-    if (companyNames.length) {
-      for (const c of companyNames) companyQueries.push(`${c} UK site:linkedin.com/company`);
-    }
+  if (fullName.trim()) {
+    addPersonalQuery(fullName);
+    if (dob) addPersonalQuery(fullName, [dob]);
+    if (tradingNamesActive.length > 1) addPersonalQuery(fullName, tradingActiveQuoted);
+    for (const t of tradingNamesActive) addPersonalQuery(fullName, [`"${t}"`]);
+    for (const t of inactiveTradingNames) addPersonalQuery(fullName, [t]);
+    for (const c of registeredAllQuoted) addPersonalQuery(fullName, [c]);
+    if (companyNames.length) addPersonalQuery(fullName, companyNames.map(c => `"${c}"`));
+  }
+  // Also run searches excluding middle names (first + last only)
+  if (shortName && shortName !== fullName) {
+    addPersonalQuery(shortName);
+    if (dob) addPersonalQuery(shortName, [dob]);
+    if (tradingNamesActive.length > 1) addPersonalQuery(shortName, tradingActiveQuoted);
+    for (const t of tradingNamesActive) addPersonalQuery(shortName, [`"${t}"`]);
+    for (const t of inactiveTradingNames) addPersonalQuery(shortName, [t]);
+    for (const c of registeredAllQuoted) addPersonalQuery(shortName, [c]);
+    if (companyNames.length) addPersonalQuery(shortName, companyNames.map(c => `"${c}"`));
+  }
+  // De-duplicate queries to keep Serper usage efficient
+  const dedupPersonal = Array.from(new Set(personalQueries));
+  personalQueries.length = 0;
+  personalQueries.push(...dedupPersonal);
+  if (companyNames.length) {
+    for (const c of companyNames) companyQueries.push(`${c} UK site:linkedin.com/company`);
+  }
     await logEvent(job.id as string, 'info', 'Built queries', {
       personalQueries,
       companyQueries,
@@ -500,6 +602,9 @@ export default new Worker("person-linkedin", async job => {
         fullName,
         dob,
         companies: companyNames,
+        companyNumbers,
+        companyDetails,
+        locations: locationHints,
         trading: tradingNamesAll,
         websites: siteHosts,
         candidate: c,
